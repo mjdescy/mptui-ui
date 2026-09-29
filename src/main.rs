@@ -1,9 +1,15 @@
 use std::{io, time::Duration};
 
-use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::{
+    event::{
+        self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+        MouseEventKind,
+    },
+    execute,
+};
 use ratatui::{
     DefaultTerminal, Frame,
-    layout::{Alignment, Constraint, Layout, Position},
+    layout::{Alignment, Constraint, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     symbols::border,
     widgets::{Block, Paragraph},
@@ -25,6 +31,14 @@ struct App {
     cursor_position: usize,
     focus: Focus,
     should_quit: bool,
+    control_areas: ControlAreas,
+}
+
+#[derive(Default)]
+struct ControlAreas {
+    textbox: Rect,
+    post_button: Rect,
+    clear_button: Rect,
 }
 
 impl Default for App {
@@ -34,12 +48,22 @@ impl Default for App {
             cursor_position: 0,
             focus: Focus::Textbox,
             should_quit: false,
+            control_areas: ControlAreas::default(),
         }
     }
 }
 
 impl App {
     fn run(mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
+        execute!(io::stdout(), event::EnableMouseCapture)?;
+
+        let result = self.run_loop(terminal);
+        let disable_result = execute!(io::stdout(), event::DisableMouseCapture);
+
+        result.and(disable_result)
+    }
+
+    fn run_loop(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         while !self.should_quit {
             terminal.draw(|frame| self.draw(frame))?;
             self.handle_events()?;
@@ -48,7 +72,7 @@ impl App {
         Ok(())
     }
 
-    fn draw(&self, frame: &mut Frame) {
+    fn draw(&mut self, frame: &mut Frame) {
         let areas = Layout::vertical([
             Constraint::Length(1),
             Constraint::Min(5),
@@ -91,6 +115,11 @@ impl App {
         ])
         .spacing(1)
         .split(areas[2]);
+        self.control_areas = ControlAreas {
+            textbox: areas[1],
+            post_button: button_areas[1],
+            clear_button: button_areas[2],
+        };
         self.render_button(frame, button_areas[1], "Post", Focus::PostButton);
         self.render_button(frame, button_areas[2], "Clear", Focus::ClearButton);
 
@@ -127,14 +156,44 @@ impl App {
     }
 
     fn handle_events(&mut self) -> io::Result<()> {
-        if event::poll(Duration::from_millis(250))?
-            && let Event::Key(key_event) = event::read()?
-            && key_event.kind == KeyEventKind::Press
-        {
-            self.handle_key_event(key_event);
+        if event::poll(Duration::from_millis(250))? {
+            match event::read()? {
+                Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
+                    self.handle_key_event(key_event);
+                }
+                Event::Mouse(mouse_event) => self.handle_mouse_event(mouse_event),
+                _ => {}
+            }
         }
 
         Ok(())
+    }
+
+    fn handle_mouse_event(&mut self, mouse_event: MouseEvent) {
+        if mouse_event.kind != MouseEventKind::Down(MouseButton::Left) {
+            return;
+        }
+
+        let position = Position::new(mouse_event.column, mouse_event.row);
+        if self.control_areas.textbox.contains(position) {
+            self.focus = Focus::Textbox;
+            let visible_width = self.control_areas.textbox.width.saturating_sub(2) as usize;
+            let scroll = if visible_width == 0 {
+                0
+            } else {
+                self.cursor_position
+                    .saturating_sub(visible_width.saturating_sub(1))
+            };
+            let click_offset = mouse_event
+                .column
+                .saturating_sub(self.control_areas.textbox.x + 1)
+                as usize;
+            self.cursor_position = (scroll + click_offset).min(self.input.len());
+        } else if self.control_areas.post_button.contains(position) {
+            self.focus = Focus::Textbox;
+        } else if self.control_areas.clear_button.contains(position) {
+            self.clear_input();
+        }
     }
 
     fn handle_key_event(&mut self, key_event: KeyEvent) {
