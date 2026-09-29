@@ -33,6 +33,7 @@ enum Focus {
 struct App {
     textarea: TextArea<'static>,
     focus: Focus,
+    hovered: Option<Focus>,
     should_quit: bool,
     control_areas: ControlAreas,
 }
@@ -49,6 +50,7 @@ impl Default for App {
         Self {
             textarea: TextArea::default(),
             focus: Focus::Textbox,
+            hovered: None,
             should_quit: false,
             control_areas: ControlAreas::default(),
         }
@@ -131,7 +133,7 @@ impl App {
         label: &str,
         focus: Focus,
     ) {
-        let style = if self.focus == focus {
+        let style = if self.focus == focus || self.hovered == Some(focus) {
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Cyan)
@@ -169,6 +171,14 @@ impl App {
 
     fn handle_mouse_event(&mut self, mouse_event: MouseEvent) {
         let position = Position::new(mouse_event.column, mouse_event.row);
+        self.hovered = if self.control_areas.post_button.contains(position) {
+            Some(Focus::PostButton)
+        } else if self.control_areas.clear_button.contains(position) {
+            Some(Focus::ClearButton)
+        } else {
+            None
+        };
+
         if self.control_areas.textbox.contains(position) {
             self.focus = Focus::Textbox;
             self.textarea.input(mouse_event);
