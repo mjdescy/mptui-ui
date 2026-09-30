@@ -43,6 +43,18 @@ enum HelpDialogFocus {
     Close,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PublishTarget {
+    Draft,
+    Post,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PublishDialogFocus {
+    Cancel,
+    Publish,
+}
+
 struct App {
     textarea: TextArea<'static>,
     focus: Focus,
@@ -52,9 +64,12 @@ struct App {
     quit_dialog_focus: QuitDialogFocus,
     help_dialog: bool,
     help_dialog_focus: HelpDialogFocus,
+    publish_dialog: Option<PublishTarget>,
+    publish_dialog_focus: PublishDialogFocus,
     control_areas: ControlAreas,
     quit_dialog_areas: QuitDialogAreas,
     help_dialog_areas: HelpDialogAreas,
+    publish_dialog_areas: PublishDialogAreas,
 }
 
 #[derive(Default)]
@@ -77,6 +92,12 @@ struct HelpDialogAreas {
     close_button: Rect,
 }
 
+#[derive(Default)]
+struct PublishDialogAreas {
+    cancel_button: Rect,
+    publish_button: Rect,
+}
+
 impl Default for App {
     fn default() -> Self {
         Self {
@@ -88,9 +109,12 @@ impl Default for App {
             quit_dialog_focus: QuitDialogFocus::Cancel,
             help_dialog: false,
             help_dialog_focus: HelpDialogFocus::Close,
+            publish_dialog: None,
+            publish_dialog_focus: PublishDialogFocus::Cancel,
             control_areas: ControlAreas::default(),
             quit_dialog_areas: QuitDialogAreas::default(),
             help_dialog_areas: HelpDialogAreas::default(),
+            publish_dialog_areas: PublishDialogAreas::default(),
         }
     }
 }
@@ -131,6 +155,7 @@ impl App {
         ])
         .spacing(1)
         .split(areas[0]);
+        let can_publish = self.has_publishable_text();
         let label = Paragraph::new("MPTUI")
             .style(
                 Style::default()
@@ -142,13 +167,20 @@ impl App {
         frame.render_widget(label, header_areas[0]);
         self.render_button(frame, header_areas[1], "Help", Focus::HelpButton);
         self.render_button(frame, header_areas[2], "Clear", Focus::ClearButton);
-        self.render_button(
+        self.render_button_with_enabled(
             frame,
             header_areas[3],
             "Publish Draft",
             Focus::SaveDraftButton,
+            can_publish,
         );
-        self.render_button(frame, header_areas[4], "Publish Post", Focus::PostButton);
+        self.render_button_with_enabled(
+            frame,
+            header_areas[4],
+            "Publish Post",
+            Focus::PostButton,
+            can_publish,
+        );
 
         let textbox_style = if self.focus == Focus::Textbox {
             Style::default().fg(Color::Cyan)
@@ -171,18 +203,85 @@ impl App {
             post_button: header_areas[4],
         };
 
-        let commands = Paragraph::new(
-            "F1 Help   Tab/Shift+Tab Navigate   Enter/Space Select   Esc Quit",
-        )
-        .style(Style::default().fg(Color::DarkGray))
-        .alignment(Alignment::Center);
+        let commands =
+            Paragraph::new("F1 Help   Tab/Shift+Tab Navigate   Enter/Space Select   Esc Quit")
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(Alignment::Center);
         frame.render_widget(commands, areas[2]);
 
         if self.quit_dialog {
             self.draw_quit_dialog(frame);
         } else if self.help_dialog {
             self.draw_help_dialog(frame);
+        } else if self.publish_dialog.is_some() {
+            self.draw_publish_dialog(frame);
         }
+    }
+
+    fn draw_publish_dialog(&mut self, frame: &mut Frame) {
+        let target = self
+            .publish_dialog
+            .expect("publish dialog should have a target while rendering");
+        let title = match target {
+            PublishTarget::Draft => " Publish Draft ",
+            PublishTarget::Post => " Publish Post ",
+        };
+        let message = match target {
+            PublishTarget::Draft => "Publish this draft?",
+            PublishTarget::Post => "Publish this post?",
+        };
+        let dialog_area = Layout::vertical([
+            Constraint::Percentage(30),
+            Constraint::Percentage(40),
+            Constraint::Percentage(30),
+        ])
+        .split(frame.area())[1];
+        let dialog_area = Layout::horizontal([
+            Constraint::Percentage(20),
+            Constraint::Percentage(60),
+            Constraint::Percentage(20),
+        ])
+        .split(dialog_area)[1];
+
+        let dialog = Block::bordered()
+            .title(title)
+            .border_style(Style::default().fg(Color::Cyan));
+        let content_area = dialog.inner(dialog_area);
+        frame.render_widget(Clear, dialog_area);
+        frame.render_widget(dialog, dialog_area);
+
+        let content = Layout::vertical([
+            Constraint::Min(1),
+            Constraint::Length(2),
+            Constraint::Length(3),
+            Constraint::Min(1),
+        ])
+        .split(content_area);
+        frame.render_widget(
+            Paragraph::new(message).alignment(Alignment::Center),
+            content[1],
+        );
+
+        let button_areas =
+            Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
+                .spacing(1)
+                .split(content[2]);
+        self.publish_dialog_areas = PublishDialogAreas {
+            cancel_button: button_areas[0],
+            publish_button: button_areas[1],
+        };
+        self.render_publish_dialog_button(
+            frame,
+            button_areas[0],
+            "Cancel",
+            PublishDialogFocus::Cancel,
+        );
+        self.render_publish_dialog_button(
+            frame,
+            button_areas[1],
+            "Publish",
+            PublishDialogFocus::Publish,
+        );
     }
 
     fn draw_help_dialog(&mut self, frame: &mut Frame) {
@@ -302,7 +401,46 @@ impl App {
         label: &str,
         focus: Focus,
     ) {
-        let style = if self.focus == focus || self.hovered == Some(focus) {
+        self.render_button_with_enabled(frame, area, label, focus, true);
+    }
+
+    fn render_button_with_enabled(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        label: &str,
+        focus: Focus,
+        enabled: bool,
+    ) {
+        let style = if !enabled {
+            Style::default().fg(Color::DarkGray)
+        } else if self.focus == focus || self.hovered == Some(focus) {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let button = Paragraph::new(label)
+            .alignment(Alignment::Center)
+            .style(style)
+            .block(
+                Block::bordered()
+                    .border_set(border::ROUNDED)
+                    .border_style(style),
+            );
+        frame.render_widget(button, area);
+    }
+
+    fn render_publish_dialog_button(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        label: &str,
+        focus: PublishDialogFocus,
+    ) {
+        let style = if self.publish_dialog_focus == focus {
             Style::default()
                 .fg(Color::Black)
                 .bg(Color::Cyan)
@@ -363,15 +501,20 @@ impl App {
             self.handle_help_dialog_mouse_event(mouse_event);
             return;
         }
+        if self.publish_dialog.is_some() {
+            self.handle_publish_dialog_mouse_event(mouse_event);
+            return;
+        }
 
         let position = Position::new(mouse_event.column, mouse_event.row);
+        let can_publish = self.has_publishable_text();
         self.hovered = if self.control_areas.help_button.contains(position) {
             Some(Focus::HelpButton)
         } else if self.control_areas.clear_button.contains(position) {
             Some(Focus::ClearButton)
-        } else if self.control_areas.save_draft_button.contains(position) {
+        } else if can_publish && self.control_areas.save_draft_button.contains(position) {
             Some(Focus::SaveDraftButton)
-        } else if self.control_areas.post_button.contains(position) {
+        } else if can_publish && self.control_areas.post_button.contains(position) {
             Some(Focus::PostButton)
         } else {
             None
@@ -391,10 +534,12 @@ impl App {
             self.help_dialog_focus = HelpDialogFocus::Close;
         } else if self.control_areas.clear_button.contains(position) {
             self.clear_input();
-        } else if self.control_areas.save_draft_button.contains(position) {
-            self.focus = Focus::Textbox;
-        } else if self.control_areas.post_button.contains(position) {
-            self.focus = Focus::Textbox;
+        } else if can_publish && self.control_areas.save_draft_button.contains(position) {
+            self.focus = Focus::SaveDraftButton;
+            self.open_publish_dialog(PublishTarget::Draft);
+        } else if can_publish && self.control_areas.post_button.contains(position) {
+            self.focus = Focus::PostButton;
+            self.open_publish_dialog(PublishTarget::Post);
         }
     }
 
@@ -425,6 +570,21 @@ impl App {
         }
     }
 
+    fn handle_publish_dialog_mouse_event(&mut self, mouse_event: MouseEvent) {
+        let position = Position::new(mouse_event.column, mouse_event.row);
+        if self.publish_dialog_areas.cancel_button.contains(position) {
+            self.publish_dialog_focus = PublishDialogFocus::Cancel;
+        } else if self.publish_dialog_areas.publish_button.contains(position) {
+            self.publish_dialog_focus = PublishDialogFocus::Publish;
+        } else {
+            return;
+        }
+
+        if mouse_event.kind == MouseEventKind::Down(MouseButton::Left) {
+            self.activate_publish_dialog_focus();
+        }
+    }
+
     fn handle_key_event(&mut self, key_event: KeyEvent) {
         if self.quit_dialog {
             self.handle_quit_dialog_key_event(key_event);
@@ -432,6 +592,10 @@ impl App {
         }
         if self.help_dialog {
             self.handle_help_dialog_key_event(key_event);
+            return;
+        }
+        if self.publish_dialog.is_some() {
+            self.handle_publish_dialog_key_event(key_event);
             return;
         }
 
@@ -474,9 +638,14 @@ impl App {
                 self.clear_input()
             }
             KeyCode::Enter | KeyCode::Char(' ')
-                if self.focus == Focus::SaveDraftButton || self.focus == Focus::PostButton =>
+                if self.focus == Focus::SaveDraftButton && self.has_publishable_text() =>
             {
-                self.focus = Focus::Textbox;
+                self.open_publish_dialog(PublishTarget::Draft);
+            }
+            KeyCode::Enter | KeyCode::Char(' ')
+                if self.focus == Focus::PostButton && self.has_publishable_text() =>
+            {
+                self.open_publish_dialog(PublishTarget::Post);
             }
             KeyCode::Enter | KeyCode::Char(' ') if self.focus == Focus::HelpButton => {
                 self.help_dialog = true;
@@ -525,12 +694,42 @@ impl App {
         }
     }
 
+    fn handle_publish_dialog_key_event(&mut self, key_event: KeyEvent) {
+        match key_event.code {
+            KeyCode::Esc | KeyCode::Char('c' | 'C') => {
+                self.publish_dialog = None;
+            }
+            KeyCode::Char('p' | 'P') => {
+                self.publish_dialog_focus = PublishDialogFocus::Publish;
+                self.activate_publish_dialog_focus();
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.publish_dialog_focus = match self.publish_dialog_focus {
+                    PublishDialogFocus::Cancel => PublishDialogFocus::Publish,
+                    PublishDialogFocus::Publish => PublishDialogFocus::Cancel,
+                };
+            }
+            KeyCode::Enter => self.activate_publish_dialog_focus(),
+            _ => {}
+        }
+    }
+
     fn activate_quit_dialog_focus(&mut self) {
         match self.quit_dialog_focus {
             QuitDialogFocus::Cancel => self.quit_dialog = false,
             QuitDialogFocus::Discard => {
                 self.quit_dialog = false;
                 self.should_quit = true;
+            }
+        }
+    }
+
+    fn activate_publish_dialog_focus(&mut self) {
+        match self.publish_dialog_focus {
+            PublishDialogFocus::Cancel => self.publish_dialog = None,
+            PublishDialogFocus::Publish => {
+                self.publish_dialog = None;
+                self.focus = Focus::Textbox;
             }
         }
     }
@@ -544,6 +743,20 @@ impl App {
         }
     }
 
+    fn open_publish_dialog(&mut self, target: PublishTarget) {
+        if self.has_publishable_text() {
+            self.publish_dialog = Some(target);
+            self.publish_dialog_focus = PublishDialogFocus::Cancel;
+        }
+    }
+
+    fn has_publishable_text(&self) -> bool {
+        self.textarea
+            .lines()
+            .iter()
+            .any(|line| !line.trim().is_empty())
+    }
+
     fn clear_input(&mut self) {
         self.textarea.select_all();
         self.textarea.cut();
@@ -551,22 +764,28 @@ impl App {
     }
 
     fn focus_next(&mut self) {
+        let can_publish = self.has_publishable_text();
         self.focus = match self.focus {
             Focus::Textbox => Focus::HelpButton,
             Focus::HelpButton => Focus::ClearButton,
-            Focus::ClearButton => Focus::SaveDraftButton,
-            Focus::SaveDraftButton => Focus::PostButton,
+            Focus::ClearButton if can_publish => Focus::SaveDraftButton,
+            Focus::ClearButton => Focus::Textbox,
+            Focus::SaveDraftButton if can_publish => Focus::PostButton,
+            Focus::SaveDraftButton => Focus::Textbox,
             Focus::PostButton => Focus::Textbox,
         };
     }
 
     fn focus_previous(&mut self) {
+        let can_publish = self.has_publishable_text();
         self.focus = match self.focus {
-            Focus::Textbox => Focus::PostButton,
+            Focus::Textbox if can_publish => Focus::PostButton,
+            Focus::Textbox => Focus::ClearButton,
             Focus::HelpButton => Focus::Textbox,
             Focus::ClearButton => Focus::HelpButton,
             Focus::SaveDraftButton => Focus::ClearButton,
-            Focus::PostButton => Focus::SaveDraftButton,
+            Focus::PostButton if can_publish => Focus::SaveDraftButton,
+            Focus::PostButton => Focus::ClearButton,
         };
     }
 }
@@ -630,6 +849,7 @@ mod tests {
     #[test]
     fn top_row_buttons_follow_visual_focus_order() {
         let mut app = App::default();
+        app.textarea.insert_str("draft");
 
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.focus, Focus::HelpButton);
@@ -639,6 +859,51 @@ mod tests {
         assert_eq!(app.focus, Focus::SaveDraftButton);
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.focus, Focus::PostButton);
+    }
+
+    #[test]
+    fn publish_buttons_skip_whitespace_only_content() {
+        let mut app = App::default();
+        app.textarea.insert_str(" \n\t");
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+
+        assert_eq!(app.focus, Focus::Textbox);
+        assert!(app.publish_dialog.is_none());
+    }
+
+    #[test]
+    fn publish_buttons_open_the_matching_confirmation_dialog() {
+        let mut app = App::default();
+        app.textarea.insert_str("draft");
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(matches!(app.publish_dialog, Some(PublishTarget::Draft)));
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+        assert!(app.publish_dialog.is_none());
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(app.publish_dialog, Some(PublishTarget::Post)));
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        assert!(app.publish_dialog.is_none());
+        assert_eq!(app.focus, Focus::Textbox);
+
+        app.control_areas.post_button = Rect::new(10, 1, 16, 3);
+        app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(matches!(app.publish_dialog, Some(PublishTarget::Post)));
     }
 
     #[test]
