@@ -124,9 +124,9 @@ impl App {
 
         let header_areas = Layout::horizontal([
             Constraint::Min(1),
-            Constraint::Length(10),
-            Constraint::Length(12),
-            Constraint::Length(14),
+            Constraint::Length(8),
+            Constraint::Length(9),
+            Constraint::Length(17),
             Constraint::Length(16),
         ])
         .spacing(1)
@@ -142,7 +142,12 @@ impl App {
         frame.render_widget(label, header_areas[0]);
         self.render_button(frame, header_areas[1], "Help", Focus::HelpButton);
         self.render_button(frame, header_areas[2], "Clear", Focus::ClearButton);
-        self.render_button(frame, header_areas[3], "Save Draft", Focus::SaveDraftButton);
+        self.render_button(
+            frame,
+            header_areas[3],
+            "Publish Draft",
+            Focus::SaveDraftButton,
+        );
         self.render_button(frame, header_areas[4], "Publish Post", Focus::PostButton);
 
         let textbox_style = if self.focus == Focus::Textbox {
