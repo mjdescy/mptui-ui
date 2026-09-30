@@ -211,7 +211,7 @@ impl App {
         };
 
         let commands = Paragraph::new(
-            "F1 Help   Tab/Shift+Tab Navigate   Enter/Space Select   Ctrl+Enter Publish Post   Esc Quit",
+            "F1 Help   Ctrl+Enter Publish Post   Alt+Ctrl+Enter Publish Draft   Esc Quit",
         )
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Center);
@@ -624,6 +624,16 @@ impl App {
 
         if self.focus == Focus::Textbox
             && key_event.code == KeyCode::Enter
+            && key_event.modifiers.contains(KeyModifiers::ALT)
+            && key_event.modifiers.contains(KeyModifiers::CONTROL)
+            && self.has_publishable_text()
+        {
+            self.open_publish_dialog(PublishTarget::Draft);
+            return;
+        }
+
+        if self.focus == Focus::Textbox
+            && key_event.code == KeyCode::Enter
             && key_event.modifiers.contains(KeyModifiers::CONTROL)
             && self.has_publishable_text()
         {
@@ -975,6 +985,19 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
 
         assert!(matches!(app.publish_dialog, Some(PublishTarget::Post)));
+    }
+
+    #[test]
+    fn alt_ctrl_enter_opens_draft_confirmation_from_textbox() {
+        let mut app = App::default();
+        app.textarea.insert_str("draft");
+
+        app.handle_key_event(KeyEvent::new(
+            KeyCode::Enter,
+            KeyModifiers::ALT | KeyModifiers::CONTROL,
+        ));
+
+        assert!(matches!(app.publish_dialog, Some(PublishTarget::Draft)));
     }
 
     #[test]
