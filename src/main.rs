@@ -14,7 +14,7 @@ use ratatui::{
     symbols::border,
     widgets::{Block, Clear, Padding, Paragraph},
 };
-use tui_textarea::TextArea;
+use tui_textarea::{TextArea, WrapMode};
 
 fn main() -> io::Result<()> {
     let mut terminal = ratatui::init();
@@ -100,8 +100,11 @@ struct PublishDialogAreas {
 
 impl Default for App {
     fn default() -> Self {
+        let mut textarea = TextArea::default();
+        textarea.set_wrap_mode(WrapMode::WordOrGlyph);
+
         Self {
-            textarea: TextArea::default(),
+            textarea,
             focus: Focus::Textbox,
             hovered: None,
             should_quit: false,
@@ -985,6 +988,13 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
 
         assert!(matches!(app.publish_dialog, Some(PublishTarget::Post)));
+    }
+
+    #[test]
+    fn textarea_uses_soft_wrapping() {
+        let app = App::default();
+
+        assert_eq!(app.textarea.wrap_mode(), WrapMode::WordOrGlyph);
     }
 
     #[test]

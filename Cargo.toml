@@ -5,5 +5,5 @@ edition = "2024"
 
 [dependencies]
 crossterm = "0.28.1"
-ratatui = "0.29.0"
-tui-textarea = "0.7.0"
+ratatui = "0.30.0"
+tui-textarea = { package = "tui-textarea-2", version = "0.13.2", default-features = false, features = ["crossterm_0_28"] }
