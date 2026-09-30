@@ -172,7 +172,7 @@ impl App {
         };
 
         let commands = Paragraph::new(
-            "F1 Help   Ctrl+Z Undo   Ctrl+Y Redo   Ctrl+V Paste   Tab/Shift+Tab Navigate   Enter/Space Select   Esc Quit",
+            "F1 Help   Tab/Shift+Tab Navigate   Enter/Space Select   Esc Quit",
         )
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Center);
