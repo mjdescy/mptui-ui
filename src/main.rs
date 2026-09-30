@@ -155,6 +155,7 @@ impl App {
         ])
         .spacing(1)
         .split(areas[0]);
+        let can_clear = !self.textarea.is_empty();
         let can_publish = self.has_publishable_text();
         let label = Paragraph::new("MPTUI")
             .style(
@@ -166,7 +167,13 @@ impl App {
             .block(Block::default().padding(Padding::new(1, 1, 1, 1)));
         frame.render_widget(label, header_areas[0]);
         self.render_button(frame, header_areas[1], "Help", Focus::HelpButton);
-        self.render_button(frame, header_areas[2], "Clear", Focus::ClearButton);
+        self.render_button_with_enabled(
+            frame,
+            header_areas[2],
+            "Clear",
+            Focus::ClearButton,
+            can_clear,
+        );
         self.render_button_with_enabled(
             frame,
             header_areas[3],
@@ -507,10 +514,11 @@ impl App {
         }
 
         let position = Position::new(mouse_event.column, mouse_event.row);
+        let can_clear = !self.textarea.is_empty();
         let can_publish = self.has_publishable_text();
         self.hovered = if self.control_areas.help_button.contains(position) {
             Some(Focus::HelpButton)
-        } else if self.control_areas.clear_button.contains(position) {
+        } else if can_clear && self.control_areas.clear_button.contains(position) {
             Some(Focus::ClearButton)
         } else if can_publish && self.control_areas.save_draft_button.contains(position) {
             Some(Focus::SaveDraftButton)
@@ -532,7 +540,7 @@ impl App {
             self.focus = Focus::HelpButton;
             self.help_dialog = true;
             self.help_dialog_focus = HelpDialogFocus::Close;
-        } else if self.control_areas.clear_button.contains(position) {
+        } else if can_clear && self.control_areas.clear_button.contains(position) {
             self.clear_input();
         } else if can_publish && self.control_areas.save_draft_button.contains(position) {
             self.focus = Focus::SaveDraftButton;
@@ -634,7 +642,9 @@ impl App {
         match key_event.code {
             KeyCode::Tab => self.focus_next(),
             KeyCode::BackTab => self.focus_previous(),
-            KeyCode::Enter | KeyCode::Char(' ') if self.focus == Focus::ClearButton => {
+            KeyCode::Enter | KeyCode::Char(' ')
+                if self.focus == Focus::ClearButton && !self.textarea.is_empty() =>
+            {
                 self.clear_input()
             }
             KeyCode::Enter | KeyCode::Char(' ')
@@ -764,10 +774,13 @@ impl App {
     }
 
     fn focus_next(&mut self) {
+        let can_clear = !self.textarea.is_empty();
         let can_publish = self.has_publishable_text();
         self.focus = match self.focus {
             Focus::Textbox => Focus::HelpButton,
-            Focus::HelpButton => Focus::ClearButton,
+            Focus::HelpButton if can_clear => Focus::ClearButton,
+            Focus::HelpButton if can_publish => Focus::SaveDraftButton,
+            Focus::HelpButton => Focus::Textbox,
             Focus::ClearButton if can_publish => Focus::SaveDraftButton,
             Focus::ClearButton => Focus::Textbox,
             Focus::SaveDraftButton if can_publish => Focus::PostButton,
@@ -777,15 +790,19 @@ impl App {
     }
 
     fn focus_previous(&mut self) {
+        let can_clear = !self.textarea.is_empty();
         let can_publish = self.has_publishable_text();
         self.focus = match self.focus {
             Focus::Textbox if can_publish => Focus::PostButton,
-            Focus::Textbox => Focus::ClearButton,
+            Focus::Textbox if can_clear => Focus::ClearButton,
+            Focus::Textbox => Focus::HelpButton,
             Focus::HelpButton => Focus::Textbox,
             Focus::ClearButton => Focus::HelpButton,
-            Focus::SaveDraftButton => Focus::ClearButton,
+            Focus::SaveDraftButton if can_clear => Focus::ClearButton,
+            Focus::SaveDraftButton => Focus::HelpButton,
             Focus::PostButton if can_publish => Focus::SaveDraftButton,
-            Focus::PostButton => Focus::ClearButton,
+            Focus::PostButton if can_clear => Focus::ClearButton,
+            Focus::PostButton => Focus::HelpButton,
         };
     }
 }
@@ -859,6 +876,40 @@ mod tests {
         assert_eq!(app.focus, Focus::SaveDraftButton);
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.focus, Focus::PostButton);
+    }
+
+    #[test]
+    fn empty_textarea_skips_and_blocks_clear_button() {
+        let mut app = App::default();
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.focus, Focus::Textbox);
+
+        app.control_areas.clear_button = Rect::new(10, 1, 9, 3);
+        app.focus = Focus::HelpButton;
+        app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert_eq!(app.focus, Focus::HelpButton);
+        assert!(app.textarea.is_empty());
+    }
+
+    #[test]
+    fn nonempty_textarea_enables_clear_button() {
+        let mut app = App::default();
+        app.textarea.insert_str(" ");
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.focus, Focus::ClearButton);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.textarea.is_empty());
+        assert_eq!(app.focus, Focus::Textbox);
     }
 
     #[test]
