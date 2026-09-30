@@ -166,10 +166,11 @@ impl App {
             post_button: header_areas[4],
         };
 
-        let commands =
-            Paragraph::new("F1 Help   Tab/Shift+Tab Navigate   Enter/Space Select   Esc Quit")
-                .style(Style::default().fg(Color::DarkGray))
-                .alignment(Alignment::Center);
+        let commands = Paragraph::new(
+            "F1 Help   Ctrl+U Undo   Ctrl+R Redo   Tab/Shift+Tab Navigate   Enter/Space Select   Esc Quit",
+        )
+        .style(Style::default().fg(Color::DarkGray))
+        .alignment(Alignment::Center);
         frame.render_widget(commands, areas[2]);
 
         if self.quit_dialog {
@@ -443,6 +444,20 @@ impl App {
             return;
         }
 
+        if self.focus == Focus::Textbox && key_event.modifiers.contains(KeyModifiers::CONTROL) {
+            match key_event.code {
+                KeyCode::Char('u') => {
+                    self.textarea.undo();
+                    return;
+                }
+                KeyCode::Char('r') => {
+                    self.textarea.redo();
+                    return;
+                }
+                _ => {}
+            }
+        }
+
         match key_event.code {
             KeyCode::Tab => self.focus_next(),
             KeyCode::BackTab => self.focus_previous(),
@@ -521,7 +536,8 @@ impl App {
     }
 
     fn clear_input(&mut self) {
-        self.textarea = TextArea::default();
+        self.textarea.select_all();
+        self.textarea.cut();
         self.focus = Focus::Textbox;
     }
 
@@ -614,6 +630,23 @@ mod tests {
         assert_eq!(app.focus, Focus::SaveDraftButton);
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.focus, Focus::PostButton);
+    }
+
+    #[test]
+    fn ctrl_u_undoes_and_ctrl_r_redoes() {
+        let mut app = App::default();
+        app.textarea.insert_str("draft");
+
+        app.clear_input();
+        assert!(app.textarea.is_empty());
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(app.textarea.lines(), ["draft"]);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+
+        assert!(app.textarea.is_empty());
+        assert_eq!(app.focus, Focus::Textbox);
     }
 
     #[test]
