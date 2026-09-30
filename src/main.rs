@@ -14,7 +14,7 @@ use ratatui::{
     symbols::border,
     widgets::{Block, Clear, Padding, Paragraph},
 };
-use tui_textarea::{TextArea, WrapMode};
+use tui_textarea::{CursorRenderMode, TextArea, WrapMode};
 
 fn main() -> io::Result<()> {
     let mut terminal = ratatui::init();
@@ -39,11 +39,6 @@ enum QuitDialogFocus {
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum HelpDialogFocus {
-    Close,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
 enum PublishTarget {
     Draft,
     Post,
@@ -62,13 +57,12 @@ struct App {
     should_quit: bool,
     quit_dialog: bool,
     quit_dialog_focus: QuitDialogFocus,
-    help_dialog: bool,
-    help_dialog_focus: HelpDialogFocus,
+    help_sidebar: bool,
+    help_textarea: TextArea<'static>,
     publish_dialog: Option<PublishTarget>,
     publish_dialog_focus: PublishDialogFocus,
     control_areas: ControlAreas,
     quit_dialog_areas: QuitDialogAreas,
-    help_dialog_areas: HelpDialogAreas,
     publish_dialog_areas: PublishDialogAreas,
 }
 
@@ -88,11 +82,6 @@ struct QuitDialogAreas {
 }
 
 #[derive(Default)]
-struct HelpDialogAreas {
-    close_button: Rect,
-}
-
-#[derive(Default)]
 struct PublishDialogAreas {
     cancel_button: Rect,
     publish_button: Rect,
@@ -102,6 +91,26 @@ impl Default for App {
     fn default() -> Self {
         let mut textarea = TextArea::default();
         textarea.set_wrap_mode(WrapMode::WordOrGlyph);
+        let mut help_textarea = TextArea::new(vec![
+            "Keyboard shortcuts".to_string(),
+            "F1 / Help       Toggle shortcuts".to_string(),
+            "Tab             Next control".to_string(),
+            "Shift+Tab       Previous control".to_string(),
+            "Enter / Space   Activate control".to_string(),
+            "Ctrl+Enter      Publish post".to_string(),
+            "Alt+Ctrl+Enter   Publish draft".to_string(),
+            "Ctrl+Z          Undo".to_string(),
+            "Ctrl+Y          Redo".to_string(),
+            "Ctrl+V          Paste".to_string(),
+            "Esc / Ctrl+Q    Quit".to_string(),
+            "".to_string(),
+            "Dialog shortcuts".to_string(),
+            "C / Esc         Cancel".to_string(),
+            "D / Q           Discard and quit".to_string(),
+            "P               Publish".to_string(),
+        ]);
+        help_textarea.set_cursor_render_mode(CursorRenderMode::Hidden);
+        help_textarea.set_wrap_mode(WrapMode::WordOrGlyph);
 
         Self {
             textarea,
@@ -110,13 +119,12 @@ impl Default for App {
             should_quit: false,
             quit_dialog: false,
             quit_dialog_focus: QuitDialogFocus::Cancel,
-            help_dialog: false,
-            help_dialog_focus: HelpDialogFocus::Close,
+            help_sidebar: false,
+            help_textarea,
             publish_dialog: None,
             publish_dialog_focus: PublishDialogFocus::Cancel,
             control_areas: ControlAreas::default(),
             quit_dialog_areas: QuitDialogAreas::default(),
-            help_dialog_areas: HelpDialogAreas::default(),
             publish_dialog_areas: PublishDialogAreas::default(),
         }
     }
@@ -197,16 +205,27 @@ impl App {
         } else {
             Style::default().fg(Color::DarkGray)
         };
+        let editor_area = if self.help_sidebar {
+            let columns =
+                Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)])
+                    .spacing(1)
+                    .split(areas[1]);
+            self.draw_help_sidebar(frame, columns[1]);
+            columns[0]
+        } else {
+            areas[1]
+        };
+
         self.textarea.set_cursor_line_style(Style::default());
         self.textarea.set_block(
             Block::bordered()
                 .border_set(border::ROUNDED)
                 .border_style(textbox_style),
         );
-        frame.render_widget(&self.textarea, areas[1]);
+        frame.render_widget(&self.textarea, editor_area);
 
         self.control_areas = ControlAreas {
-            textbox: areas[1],
+            textbox: editor_area,
             help_button: header_areas[1],
             clear_button: header_areas[2],
             save_draft_button: header_areas[3],
@@ -222,11 +241,21 @@ impl App {
 
         if self.quit_dialog {
             self.draw_quit_dialog(frame);
-        } else if self.help_dialog {
-            self.draw_help_dialog(frame);
         } else if self.publish_dialog.is_some() {
             self.draw_publish_dialog(frame);
         }
+    }
+
+    fn draw_help_sidebar(&mut self, frame: &mut Frame, area: Rect) {
+        self.help_textarea
+            .set_cursor_render_mode(CursorRenderMode::Hidden);
+        self.help_textarea.set_block(
+            Block::bordered()
+                .border_set(border::ROUNDED)
+                .title(" Keyboard Shortcuts ")
+                .border_style(Style::default().fg(Color::DarkGray)),
+        );
+        frame.render_widget(&self.help_textarea, area);
     }
 
     fn draw_publish_dialog(&mut self, frame: &mut Frame) {
@@ -293,41 +322,6 @@ impl App {
             "Publish",
             PublishDialogFocus::Publish,
         );
-    }
-
-    fn draw_help_dialog(&mut self, frame: &mut Frame) {
-        let dialog_area = Layout::vertical([
-            Constraint::Percentage(25),
-            Constraint::Percentage(50),
-            Constraint::Percentage(25),
-        ])
-        .split(frame.area())[1];
-        let dialog_area = Layout::horizontal([
-            Constraint::Percentage(20),
-            Constraint::Percentage(60),
-            Constraint::Percentage(20),
-        ])
-        .split(dialog_area)[1];
-
-        let dialog = Block::bordered()
-            .title(" Help ")
-            .border_style(Style::default().fg(Color::Cyan));
-        let content_area = dialog.inner(dialog_area);
-        frame.render_widget(Clear, dialog_area);
-        frame.render_widget(dialog, dialog_area);
-
-        let content = Layout::vertical([
-            Constraint::Min(1),
-            Constraint::Length(2),
-            Constraint::Length(3),
-            Constraint::Min(1),
-        ])
-        .split(content_area);
-        let message = Paragraph::new("Help content goes here.").alignment(Alignment::Center);
-        frame.render_widget(message, content[1]);
-
-        self.help_dialog_areas.close_button = content[2];
-        self.render_help_button(frame, content[2], "Close");
     }
 
     fn draw_quit_dialog(&mut self, frame: &mut Frame) {
@@ -470,22 +464,6 @@ impl App {
         frame.render_widget(button, area);
     }
 
-    fn render_help_button(&self, frame: &mut Frame, area: Rect, label: &str) {
-        let style = Style::default()
-            .fg(Color::Black)
-            .bg(Color::Cyan)
-            .add_modifier(Modifier::BOLD);
-        let button = Paragraph::new(label)
-            .alignment(Alignment::Center)
-            .style(style)
-            .block(
-                Block::bordered()
-                    .border_set(border::ROUNDED)
-                    .border_style(style),
-            );
-        frame.render_widget(button, area);
-    }
-
     fn handle_events(&mut self) -> io::Result<()> {
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
@@ -506,10 +484,6 @@ impl App {
     fn handle_mouse_event(&mut self, mouse_event: MouseEvent) {
         if self.quit_dialog {
             self.handle_quit_dialog_mouse_event(mouse_event);
-            return;
-        }
-        if self.help_dialog {
-            self.handle_help_dialog_mouse_event(mouse_event);
             return;
         }
         if self.publish_dialog.is_some() {
@@ -542,8 +516,7 @@ impl App {
             return;
         } else if self.control_areas.help_button.contains(position) {
             self.focus = Focus::HelpButton;
-            self.help_dialog = true;
-            self.help_dialog_focus = HelpDialogFocus::Close;
+            self.help_sidebar = !self.help_sidebar;
         } else if can_clear && self.control_areas.clear_button.contains(position) {
             self.clear_input();
         } else if can_publish && self.control_areas.save_draft_button.contains(position) {
@@ -552,18 +525,6 @@ impl App {
         } else if can_publish && self.control_areas.post_button.contains(position) {
             self.focus = Focus::PostButton;
             self.open_publish_dialog(PublishTarget::Post);
-        }
-    }
-
-    fn handle_help_dialog_mouse_event(&mut self, mouse_event: MouseEvent) {
-        let position = Position::new(mouse_event.column, mouse_event.row);
-        if !self.help_dialog_areas.close_button.contains(position) {
-            return;
-        }
-
-        self.help_dialog_focus = HelpDialogFocus::Close;
-        if mouse_event.kind == MouseEventKind::Down(MouseButton::Left) {
-            self.help_dialog = false;
         }
     }
 
@@ -602,10 +563,6 @@ impl App {
             self.handle_quit_dialog_key_event(key_event);
             return;
         }
-        if self.help_dialog {
-            self.handle_help_dialog_key_event(key_event);
-            return;
-        }
         if self.publish_dialog.is_some() {
             self.handle_publish_dialog_key_event(key_event);
             return;
@@ -620,8 +577,7 @@ impl App {
         }
 
         if key_event.code == KeyCode::F(1) {
-            self.help_dialog = true;
-            self.help_dialog_focus = HelpDialogFocus::Close;
+            self.help_sidebar = !self.help_sidebar;
             return;
         }
 
@@ -681,21 +637,10 @@ impl App {
                 self.open_publish_dialog(PublishTarget::Post);
             }
             KeyCode::Enter | KeyCode::Char(' ') if self.focus == Focus::HelpButton => {
-                self.help_dialog = true;
-                self.help_dialog_focus = HelpDialogFocus::Close;
+                self.help_sidebar = !self.help_sidebar;
             }
             _ if self.focus == Focus::Textbox => {
                 self.textarea.input(key_event);
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_help_dialog_key_event(&mut self, key_event: KeyEvent) {
-        match key_event.code {
-            KeyCode::Esc | KeyCode::Enter => self.help_dialog = false,
-            KeyCode::Tab | KeyCode::BackTab => {
-                self.help_dialog_focus = HelpDialogFocus::Close;
             }
             _ => {}
         }
@@ -1041,14 +986,14 @@ mod tests {
     }
 
     #[test]
-    fn help_button_opens_and_closes_modal_with_keyboard_and_mouse() {
+    fn help_command_toggles_sidebar_with_keyboard_and_mouse() {
         let mut app = App::default();
 
         app.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
-        assert!(app.help_dialog);
+        assert!(app.help_sidebar);
 
-        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
-        assert!(!app.help_dialog);
+        app.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+        assert!(!app.help_sidebar);
 
         app.control_areas.help_button = Rect::new(10, 1, 10, 3);
         app.handle_mouse_event(MouseEvent {
@@ -1057,15 +1002,14 @@ mod tests {
             row: 2,
             modifiers: KeyModifiers::NONE,
         });
-        assert!(app.help_dialog);
+        assert!(app.help_sidebar);
 
-        app.help_dialog_areas.close_button = Rect::new(10, 10, 10, 3);
         app.handle_mouse_event(MouseEvent {
             kind: MouseEventKind::Down(MouseButton::Left),
             column: 12,
-            row: 11,
+            row: 2,
             modifiers: KeyModifiers::NONE,
         });
-        assert!(!app.help_dialog);
+        assert!(!app.help_sidebar);
     }
 }
