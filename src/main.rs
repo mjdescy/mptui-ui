@@ -23,11 +23,19 @@ fn main() -> io::Result<()> {
     result
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
     Textbox,
+    PostMode,
+    DraftMode,
     PostButton,
     ClearButton,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ComposeMode {
+    Post,
+    Draft,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -39,6 +47,7 @@ enum QuitDialogFocus {
 struct App {
     textarea: TextArea<'static>,
     focus: Focus,
+    compose_mode: ComposeMode,
     hovered: Option<Focus>,
     should_quit: bool,
     quit_dialog: bool,
@@ -50,6 +59,8 @@ struct App {
 #[derive(Default)]
 struct ControlAreas {
     textbox: Rect,
+    post_mode: Rect,
+    draft_mode: Rect,
     post_button: Rect,
     clear_button: Rect,
 }
@@ -65,6 +76,7 @@ impl Default for App {
         Self {
             textarea: TextArea::default(),
             focus: Focus::Textbox,
+            compose_mode: ComposeMode::Post,
             hovered: None,
             should_quit: false,
             quit_dialog: false,
@@ -128,6 +140,8 @@ impl App {
         frame.render_widget(&self.textarea, areas[1]);
 
         let button_areas = Layout::horizontal([
+            Constraint::Length(10),
+            Constraint::Length(11),
             Constraint::Fill(1),
             Constraint::Length(12),
             Constraint::Length(12),
@@ -137,11 +151,27 @@ impl App {
         .split(areas[2]);
         self.control_areas = ControlAreas {
             textbox: areas[1],
-            post_button: button_areas[1],
-            clear_button: button_areas[2],
+            post_mode: button_areas[0],
+            draft_mode: button_areas[1],
+            post_button: button_areas[3],
+            clear_button: button_areas[4],
         };
-        self.render_button(frame, button_areas[1], "Post", Focus::PostButton);
-        self.render_button(frame, button_areas[2], "Clear", Focus::ClearButton);
+        self.render_radio(
+            frame,
+            button_areas[0],
+            "Post",
+            ComposeMode::Post,
+            Focus::PostMode,
+        );
+        self.render_radio(
+            frame,
+            button_areas[1],
+            "Draft",
+            ComposeMode::Draft,
+            Focus::DraftMode,
+        );
+        self.render_button(frame, button_areas[3], "Post", Focus::PostButton);
+        self.render_button(frame, button_areas[4], "Clear", Focus::ClearButton);
 
         if self.quit_dialog {
             self.draw_quit_dialog(frame);
@@ -249,6 +279,31 @@ impl App {
         frame.render_widget(button, area);
     }
 
+    fn render_radio(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        label: &str,
+        mode: ComposeMode,
+        focus: Focus,
+    ) {
+        let is_active = self.compose_mode == mode;
+        let style = if self.focus == focus || self.hovered == Some(focus) {
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else if is_active {
+            Style::default().fg(Color::Cyan)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let marker = if is_active { "(*)" } else { "( )" };
+        let radio = Paragraph::new(format!("{marker} {label}"))
+            .style(style)
+            .alignment(Alignment::Left);
+        frame.render_widget(radio, area);
+    }
+
     fn handle_events(&mut self) -> io::Result<()> {
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
@@ -273,7 +328,11 @@ impl App {
         }
 
         let position = Position::new(mouse_event.column, mouse_event.row);
-        self.hovered = if self.control_areas.post_button.contains(position) {
+        self.hovered = if self.control_areas.post_mode.contains(position) {
+            Some(Focus::PostMode)
+        } else if self.control_areas.draft_mode.contains(position) {
+            Some(Focus::DraftMode)
+        } else if self.control_areas.post_button.contains(position) {
             Some(Focus::PostButton)
         } else if self.control_areas.clear_button.contains(position) {
             Some(Focus::ClearButton)
@@ -289,6 +348,12 @@ impl App {
 
         if mouse_event.kind != MouseEventKind::Down(MouseButton::Left) {
             return;
+        } else if self.control_areas.post_mode.contains(position) {
+            self.focus = Focus::PostMode;
+            self.compose_mode = ComposeMode::Post;
+        } else if self.control_areas.draft_mode.contains(position) {
+            self.focus = Focus::DraftMode;
+            self.compose_mode = ComposeMode::Draft;
         } else if self.control_areas.post_button.contains(position) {
             self.focus = Focus::Textbox;
         } else if self.control_areas.clear_button.contains(position) {
@@ -328,6 +393,12 @@ impl App {
         match key_event.code {
             KeyCode::Tab => self.focus_next(),
             KeyCode::BackTab => self.focus_previous(),
+            KeyCode::Enter | KeyCode::Char(' ') if self.focus == Focus::PostMode => {
+                self.compose_mode = ComposeMode::Post;
+            }
+            KeyCode::Enter | KeyCode::Char(' ') if self.focus == Focus::DraftMode => {
+                self.compose_mode = ComposeMode::Draft;
+            }
             KeyCode::Enter if self.focus == Focus::ClearButton => self.clear_input(),
             KeyCode::Enter if self.focus == Focus::PostButton => self.focus = Focus::Textbox,
             _ if self.focus == Focus::Textbox => {
@@ -389,7 +460,9 @@ impl App {
 
     fn focus_next(&mut self) {
         self.focus = match self.focus {
-            Focus::Textbox => Focus::PostButton,
+            Focus::Textbox => Focus::PostMode,
+            Focus::PostMode => Focus::DraftMode,
+            Focus::DraftMode => Focus::PostButton,
             Focus::PostButton => Focus::ClearButton,
             Focus::ClearButton => Focus::Textbox,
         };
@@ -398,7 +471,9 @@ impl App {
     fn focus_previous(&mut self) {
         self.focus = match self.focus {
             Focus::Textbox => Focus::ClearButton,
-            Focus::PostButton => Focus::Textbox,
+            Focus::PostMode => Focus::Textbox,
+            Focus::DraftMode => Focus::PostMode,
+            Focus::PostButton => Focus::DraftMode,
             Focus::ClearButton => Focus::PostButton,
         };
     }
@@ -458,5 +533,28 @@ mod tests {
 
         assert!(app.should_quit);
         assert!(!app.quit_dialog);
+    }
+
+    #[test]
+    fn mode_radio_buttons_support_keyboard_and_mouse_selection() {
+        let mut app = App::default();
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.focus, Focus::PostMode);
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Char(' '), KeyModifiers::NONE));
+        assert_eq!(app.focus, Focus::DraftMode);
+        assert_eq!(app.compose_mode, ComposeMode::Draft);
+
+        app.control_areas.draft_mode = Rect::new(10, 10, 11, 3);
+        app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 11,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert_eq!(app.focus, Focus::DraftMode);
+        assert_eq!(app.compose_mode, ComposeMode::Draft);
     }
 }
