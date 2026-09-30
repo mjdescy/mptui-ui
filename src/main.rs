@@ -12,7 +12,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     symbols::border,
-    widgets::{Block, Paragraph},
+    widgets::{Block, Clear, Paragraph},
 };
 use tui_textarea::TextArea;
 
@@ -30,12 +30,21 @@ enum Focus {
     ClearButton,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum QuitDialogFocus {
+    Cancel,
+    Discard,
+}
+
 struct App {
     textarea: TextArea<'static>,
     focus: Focus,
     hovered: Option<Focus>,
     should_quit: bool,
+    quit_dialog: bool,
+    quit_dialog_focus: QuitDialogFocus,
     control_areas: ControlAreas,
+    quit_dialog_areas: QuitDialogAreas,
 }
 
 #[derive(Default)]
@@ -45,6 +54,12 @@ struct ControlAreas {
     clear_button: Rect,
 }
 
+#[derive(Default)]
+struct QuitDialogAreas {
+    cancel_button: Rect,
+    discard_button: Rect,
+}
+
 impl Default for App {
     fn default() -> Self {
         Self {
@@ -52,7 +67,10 @@ impl Default for App {
             focus: Focus::Textbox,
             hovered: None,
             should_quit: false,
+            quit_dialog: false,
+            quit_dialog_focus: QuitDialogFocus::Cancel,
             control_areas: ControlAreas::default(),
+            quit_dialog_areas: QuitDialogAreas::default(),
         }
     }
 }
@@ -124,6 +142,85 @@ impl App {
         };
         self.render_button(frame, button_areas[1], "Post", Focus::PostButton);
         self.render_button(frame, button_areas[2], "Clear", Focus::ClearButton);
+
+        if self.quit_dialog {
+            self.draw_quit_dialog(frame);
+        }
+    }
+
+    fn draw_quit_dialog(&mut self, frame: &mut Frame) {
+        let dialog_area = Layout::vertical([
+            Constraint::Percentage(30),
+            Constraint::Percentage(40),
+            Constraint::Percentage(30),
+        ])
+        .split(frame.area())[1];
+        let dialog_area = Layout::horizontal([
+            Constraint::Percentage(20),
+            Constraint::Percentage(60),
+            Constraint::Percentage(20),
+        ])
+        .split(dialog_area)[1];
+
+        let dialog = Block::bordered()
+            .title(" Quit ")
+            .border_style(Style::default().fg(Color::Yellow));
+        let content_area = dialog.inner(dialog_area);
+        frame.render_widget(Clear, dialog_area);
+        frame.render_widget(dialog, dialog_area);
+
+        let content = Layout::vertical([
+            Constraint::Min(1),
+            Constraint::Length(2),
+            Constraint::Length(3),
+            Constraint::Min(1),
+        ])
+        .split(content_area);
+        let message =
+            Paragraph::new("Discard your current draft and quit?").alignment(Alignment::Center);
+        frame.render_widget(message, content[1]);
+
+        let button_areas =
+            Layout::horizontal([Constraint::Percentage(40), Constraint::Percentage(60)])
+                .spacing(1)
+                .split(content[2]);
+        self.quit_dialog_areas = QuitDialogAreas {
+            cancel_button: button_areas[0],
+            discard_button: button_areas[1],
+        };
+        self.render_quit_button(frame, button_areas[0], "Cancel", QuitDialogFocus::Cancel);
+        self.render_quit_button(
+            frame,
+            button_areas[1],
+            "Discard and Quit",
+            QuitDialogFocus::Discard,
+        );
+    }
+
+    fn render_quit_button(
+        &self,
+        frame: &mut Frame,
+        area: Rect,
+        label: &str,
+        focus: QuitDialogFocus,
+    ) {
+        let style = if self.quit_dialog_focus == focus {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Yellow)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::White)
+        };
+        let button = Paragraph::new(label)
+            .alignment(Alignment::Center)
+            .style(style)
+            .block(
+                Block::bordered()
+                    .border_set(border::ROUNDED)
+                    .border_style(style),
+            );
+        frame.render_widget(button, area);
     }
 
     fn render_button(
@@ -170,6 +267,11 @@ impl App {
     }
 
     fn handle_mouse_event(&mut self, mouse_event: MouseEvent) {
+        if self.quit_dialog {
+            self.handle_quit_dialog_mouse_event(mouse_event);
+            return;
+        }
+
         let position = Position::new(mouse_event.column, mouse_event.row);
         self.hovered = if self.control_areas.post_button.contains(position) {
             Some(Focus::PostButton)
@@ -194,12 +296,32 @@ impl App {
         }
     }
 
+    fn handle_quit_dialog_mouse_event(&mut self, mouse_event: MouseEvent) {
+        let position = Position::new(mouse_event.column, mouse_event.row);
+        if self.quit_dialog_areas.cancel_button.contains(position) {
+            self.quit_dialog_focus = QuitDialogFocus::Cancel;
+        } else if self.quit_dialog_areas.discard_button.contains(position) {
+            self.quit_dialog_focus = QuitDialogFocus::Discard;
+        } else {
+            return;
+        }
+
+        if mouse_event.kind == MouseEventKind::Down(MouseButton::Left) {
+            self.activate_quit_dialog_focus();
+        }
+    }
+
     fn handle_key_event(&mut self, key_event: KeyEvent) {
+        if self.quit_dialog {
+            self.handle_quit_dialog_key_event(key_event);
+            return;
+        }
+
         if key_event.code == KeyCode::Esc
             || (key_event.code == KeyCode::Char('q')
                 && key_event.modifiers.contains(KeyModifiers::CONTROL))
         {
-            self.should_quit = true;
+            self.request_quit();
             return;
         }
 
@@ -212,6 +334,51 @@ impl App {
                 self.textarea.input(key_event);
             }
             _ => {}
+        }
+    }
+
+    fn handle_quit_dialog_key_event(&mut self, key_event: KeyEvent) {
+        match key_event.code {
+            KeyCode::Esc | KeyCode::Char('c' | 'C') => {
+                self.quit_dialog = false;
+            }
+            KeyCode::Char('d' | 'D') | KeyCode::Char('q' | 'Q') => {
+                self.quit_dialog_focus = QuitDialogFocus::Discard;
+                self.activate_quit_dialog_focus();
+            }
+            KeyCode::Tab => {
+                self.quit_dialog_focus = match self.quit_dialog_focus {
+                    QuitDialogFocus::Cancel => QuitDialogFocus::Discard,
+                    QuitDialogFocus::Discard => QuitDialogFocus::Cancel,
+                };
+            }
+            KeyCode::BackTab => {
+                self.quit_dialog_focus = match self.quit_dialog_focus {
+                    QuitDialogFocus::Cancel => QuitDialogFocus::Discard,
+                    QuitDialogFocus::Discard => QuitDialogFocus::Cancel,
+                };
+            }
+            KeyCode::Enter => self.activate_quit_dialog_focus(),
+            _ => {}
+        }
+    }
+
+    fn activate_quit_dialog_focus(&mut self) {
+        match self.quit_dialog_focus {
+            QuitDialogFocus::Cancel => self.quit_dialog = false,
+            QuitDialogFocus::Discard => {
+                self.quit_dialog = false;
+                self.should_quit = true;
+            }
+        }
+    }
+
+    fn request_quit(&mut self) {
+        if self.textarea.is_empty() {
+            self.should_quit = true;
+        } else {
+            self.quit_dialog = true;
+            self.quit_dialog_focus = QuitDialogFocus::Cancel;
         }
     }
 
@@ -234,5 +401,62 @@ impl App {
             Focus::PostButton => Focus::Textbox,
             Focus::ClearButton => Focus::PostButton,
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_draft_quits_without_confirmation() {
+        let mut app = App::default();
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        assert!(app.should_quit);
+        assert!(!app.quit_dialog);
+    }
+
+    #[test]
+    fn draft_opens_confirmation_and_cancel_keeps_app_running() {
+        let mut app = App::default();
+        app.textarea.insert_str("draft");
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.quit_dialog);
+        assert!(!app.should_quit);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
+
+        assert!(!app.quit_dialog);
+        assert!(!app.should_quit);
+    }
+
+    #[test]
+    fn discard_accelerator_and_mouse_button_quit_with_draft() {
+        let mut app = App::default();
+        app.textarea.insert_str("draft");
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::NONE));
+
+        assert!(app.should_quit);
+        assert!(!app.quit_dialog);
+
+        let mut app = App::default();
+        app.textarea.insert_str("draft");
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        app.quit_dialog_areas.discard_button = Rect::new(10, 10, 10, 3);
+
+        app.handle_quit_dialog_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 11,
+            modifiers: KeyModifiers::NONE,
+        });
+
+        assert!(app.should_quit);
+        assert!(!app.quit_dialog);
     }
 }
