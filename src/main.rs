@@ -12,7 +12,7 @@ use ratatui::{
     layout::{Alignment, Constraint, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     symbols::border,
-    widgets::{Block, Clear, Paragraph},
+    widgets::{Block, Clear, Padding, Paragraph},
 };
 use tui_textarea::TextArea;
 
@@ -127,7 +127,7 @@ impl App {
             Constraint::Length(10),
             Constraint::Length(12),
             Constraint::Length(14),
-            Constraint::Length(12),
+            Constraint::Length(16),
         ])
         .spacing(1)
         .split(areas[0]);
@@ -137,7 +137,8 @@ impl App {
                     .fg(Color::Cyan)
                     .add_modifier(Modifier::BOLD),
             )
-            .alignment(Alignment::Left);
+            .alignment(Alignment::Left)
+            .block(Block::default().padding(Padding::vertical(1)));
         frame.render_widget(label, header_areas[0]);
         self.render_button(frame, header_areas[1], "Help", Focus::HelpButton);
         self.render_button(frame, header_areas[2], "Clear", Focus::ClearButton);
