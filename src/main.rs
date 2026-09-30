@@ -30,6 +30,7 @@ enum Focus {
     DraftMode,
     PostButton,
     ClearButton,
+    HelpButton,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,6 +45,11 @@ enum QuitDialogFocus {
     Discard,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HelpDialogFocus {
+    Close,
+}
+
 struct App {
     textarea: TextArea<'static>,
     focus: Focus,
@@ -52,13 +58,17 @@ struct App {
     should_quit: bool,
     quit_dialog: bool,
     quit_dialog_focus: QuitDialogFocus,
+    help_dialog: bool,
+    help_dialog_focus: HelpDialogFocus,
     control_areas: ControlAreas,
     quit_dialog_areas: QuitDialogAreas,
+    help_dialog_areas: HelpDialogAreas,
 }
 
 #[derive(Default)]
 struct ControlAreas {
     textbox: Rect,
+    help_button: Rect,
     post_mode: Rect,
     draft_mode: Rect,
     post_button: Rect,
@@ -71,6 +81,11 @@ struct QuitDialogAreas {
     discard_button: Rect,
 }
 
+#[derive(Default)]
+struct HelpDialogAreas {
+    close_button: Rect,
+}
+
 impl Default for App {
     fn default() -> Self {
         Self {
@@ -81,8 +96,11 @@ impl Default for App {
             should_quit: false,
             quit_dialog: false,
             quit_dialog_focus: QuitDialogFocus::Cancel,
+            help_dialog: false,
+            help_dialog_focus: HelpDialogFocus::Close,
             control_areas: ControlAreas::default(),
             quit_dialog_areas: QuitDialogAreas::default(),
+            help_dialog_areas: HelpDialogAreas::default(),
         }
     }
 }
@@ -108,18 +126,26 @@ impl App {
 
     fn draw(&mut self, frame: &mut Frame) {
         let areas = Layout::vertical([
-            Constraint::Length(1),
+            Constraint::Length(3),
             Constraint::Min(5),
             Constraint::Length(3),
+            Constraint::Length(1),
         ])
         .split(frame.area());
 
-        let label = Paragraph::new("Post").style(
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        );
-        frame.render_widget(label, areas[0]);
+        let header_areas = Layout::horizontal([Constraint::Min(1), Constraint::Length(10)])
+            .spacing(1)
+            .split(areas[0]);
+        let label = Paragraph::new("MPTUI")
+            .style(
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .alignment(Alignment::Left);
+        frame.render_widget(label, header_areas[0]);
+        self.control_areas.help_button = header_areas[1];
+        self.render_button(frame, header_areas[1], "Help", Focus::HelpButton);
 
         let textbox_style = if self.focus == Focus::Textbox {
             Style::default().fg(Color::Cyan)
@@ -151,6 +177,7 @@ impl App {
         .split(areas[2]);
         self.control_areas = ControlAreas {
             textbox: areas[1],
+            help_button: header_areas[1],
             post_mode: button_areas[0],
             draft_mode: button_areas[1],
             post_button: button_areas[3],
@@ -173,9 +200,52 @@ impl App {
         self.render_button(frame, button_areas[3], "Post", Focus::PostButton);
         self.render_button(frame, button_areas[4], "Clear", Focus::ClearButton);
 
+        let commands =
+            Paragraph::new("F1 Help   Tab/Shift+Tab Navigate   Enter/Space Select   Esc Quit")
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(Alignment::Center);
+        frame.render_widget(commands, areas[3]);
+
         if self.quit_dialog {
             self.draw_quit_dialog(frame);
+        } else if self.help_dialog {
+            self.draw_help_dialog(frame);
         }
+    }
+
+    fn draw_help_dialog(&mut self, frame: &mut Frame) {
+        let dialog_area = Layout::vertical([
+            Constraint::Percentage(25),
+            Constraint::Percentage(50),
+            Constraint::Percentage(25),
+        ])
+        .split(frame.area())[1];
+        let dialog_area = Layout::horizontal([
+            Constraint::Percentage(20),
+            Constraint::Percentage(60),
+            Constraint::Percentage(20),
+        ])
+        .split(dialog_area)[1];
+
+        let dialog = Block::bordered()
+            .title(" Help ")
+            .border_style(Style::default().fg(Color::Cyan));
+        let content_area = dialog.inner(dialog_area);
+        frame.render_widget(Clear, dialog_area);
+        frame.render_widget(dialog, dialog_area);
+
+        let content = Layout::vertical([
+            Constraint::Min(1),
+            Constraint::Length(2),
+            Constraint::Length(3),
+            Constraint::Min(1),
+        ])
+        .split(content_area);
+        let message = Paragraph::new("Help content goes here.").alignment(Alignment::Center);
+        frame.render_widget(message, content[1]);
+
+        self.help_dialog_areas.close_button = content[2];
+        self.render_help_button(frame, content[2], "Close");
     }
 
     fn draw_quit_dialog(&mut self, frame: &mut Frame) {
@@ -304,6 +374,22 @@ impl App {
         frame.render_widget(radio, area);
     }
 
+    fn render_help_button(&self, frame: &mut Frame, area: Rect, label: &str) {
+        let style = Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD);
+        let button = Paragraph::new(label)
+            .alignment(Alignment::Center)
+            .style(style)
+            .block(
+                Block::bordered()
+                    .border_set(border::ROUNDED)
+                    .border_style(style),
+            );
+        frame.render_widget(button, area);
+    }
+
     fn handle_events(&mut self) -> io::Result<()> {
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
@@ -326,9 +412,15 @@ impl App {
             self.handle_quit_dialog_mouse_event(mouse_event);
             return;
         }
+        if self.help_dialog {
+            self.handle_help_dialog_mouse_event(mouse_event);
+            return;
+        }
 
         let position = Position::new(mouse_event.column, mouse_event.row);
-        self.hovered = if self.control_areas.post_mode.contains(position) {
+        self.hovered = if self.control_areas.help_button.contains(position) {
+            Some(Focus::HelpButton)
+        } else if self.control_areas.post_mode.contains(position) {
             Some(Focus::PostMode)
         } else if self.control_areas.draft_mode.contains(position) {
             Some(Focus::DraftMode)
@@ -348,6 +440,10 @@ impl App {
 
         if mouse_event.kind != MouseEventKind::Down(MouseButton::Left) {
             return;
+        } else if self.control_areas.help_button.contains(position) {
+            self.focus = Focus::HelpButton;
+            self.help_dialog = true;
+            self.help_dialog_focus = HelpDialogFocus::Close;
         } else if self.control_areas.post_mode.contains(position) {
             self.focus = Focus::PostMode;
             self.compose_mode = ComposeMode::Post;
@@ -358,6 +454,18 @@ impl App {
             self.focus = Focus::Textbox;
         } else if self.control_areas.clear_button.contains(position) {
             self.clear_input();
+        }
+    }
+
+    fn handle_help_dialog_mouse_event(&mut self, mouse_event: MouseEvent) {
+        let position = Position::new(mouse_event.column, mouse_event.row);
+        if !self.help_dialog_areas.close_button.contains(position) {
+            return;
+        }
+
+        self.help_dialog_focus = HelpDialogFocus::Close;
+        if mouse_event.kind == MouseEventKind::Down(MouseButton::Left) {
+            self.help_dialog = false;
         }
     }
 
@@ -381,12 +489,22 @@ impl App {
             self.handle_quit_dialog_key_event(key_event);
             return;
         }
+        if self.help_dialog {
+            self.handle_help_dialog_key_event(key_event);
+            return;
+        }
 
         if key_event.code == KeyCode::Esc
             || (key_event.code == KeyCode::Char('q')
                 && key_event.modifiers.contains(KeyModifiers::CONTROL))
         {
             self.request_quit();
+            return;
+        }
+
+        if key_event.code == KeyCode::F(1) {
+            self.help_dialog = true;
+            self.help_dialog_focus = HelpDialogFocus::Close;
             return;
         }
 
@@ -401,8 +519,22 @@ impl App {
             }
             KeyCode::Enter if self.focus == Focus::ClearButton => self.clear_input(),
             KeyCode::Enter if self.focus == Focus::PostButton => self.focus = Focus::Textbox,
+            KeyCode::Enter if self.focus == Focus::HelpButton => {
+                self.help_dialog = true;
+                self.help_dialog_focus = HelpDialogFocus::Close;
+            }
             _ if self.focus == Focus::Textbox => {
                 self.textarea.input(key_event);
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_help_dialog_key_event(&mut self, key_event: KeyEvent) {
+        match key_event.code {
+            KeyCode::Esc | KeyCode::Enter => self.help_dialog = false,
+            KeyCode::Tab | KeyCode::BackTab => {
+                self.help_dialog_focus = HelpDialogFocus::Close;
             }
             _ => {}
         }
@@ -464,7 +596,8 @@ impl App {
             Focus::PostMode => Focus::DraftMode,
             Focus::DraftMode => Focus::PostButton,
             Focus::PostButton => Focus::ClearButton,
-            Focus::ClearButton => Focus::Textbox,
+            Focus::ClearButton => Focus::HelpButton,
+            Focus::HelpButton => Focus::Textbox,
         };
     }
 
@@ -475,6 +608,7 @@ impl App {
             Focus::DraftMode => Focus::PostMode,
             Focus::PostButton => Focus::DraftMode,
             Focus::ClearButton => Focus::PostButton,
+            Focus::HelpButton => Focus::ClearButton,
         };
     }
 }
@@ -556,5 +690,34 @@ mod tests {
 
         assert_eq!(app.focus, Focus::DraftMode);
         assert_eq!(app.compose_mode, ComposeMode::Draft);
+    }
+
+    #[test]
+    fn help_button_opens_and_closes_modal_with_keyboard_and_mouse() {
+        let mut app = App::default();
+
+        app.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+        assert!(app.help_dialog);
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(!app.help_dialog);
+
+        app.control_areas.help_button = Rect::new(10, 1, 10, 3);
+        app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(app.help_dialog);
+
+        app.help_dialog_areas.close_button = Rect::new(10, 10, 10, 3);
+        app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 11,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(!app.help_dialog);
     }
 }
