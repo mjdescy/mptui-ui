@@ -138,7 +138,7 @@ impl App {
                     .add_modifier(Modifier::BOLD),
             )
             .alignment(Alignment::Left)
-            .block(Block::default().padding(Padding::vertical(1)));
+            .block(Block::default().padding(Padding::new(1, 1, 1, 1)));
         frame.render_widget(label, header_areas[0]);
         self.render_button(frame, header_areas[1], "Help", Focus::HelpButton);
         self.render_button(frame, header_areas[2], "Clear", Focus::ClearButton);
@@ -302,7 +302,7 @@ impl App {
                 .bg(Color::Cyan)
                 .add_modifier(Modifier::BOLD)
         } else {
-            Style::default().fg(Color::White)
+            Style::default().fg(Color::DarkGray)
         };
         let button = Paragraph::new(label)
             .alignment(Alignment::Center)
