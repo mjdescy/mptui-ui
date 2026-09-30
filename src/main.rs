@@ -210,10 +210,11 @@ impl App {
             post_button: header_areas[4],
         };
 
-        let commands =
-            Paragraph::new("F1 Help   Tab/Shift+Tab Navigate   Enter/Space Select   Esc Quit")
-                .style(Style::default().fg(Color::DarkGray))
-                .alignment(Alignment::Center);
+        let commands = Paragraph::new(
+            "F1 Help   Tab/Shift+Tab Navigate   Enter/Space Select   Ctrl+Enter Publish Post   Esc Quit",
+        )
+        .style(Style::default().fg(Color::DarkGray))
+        .alignment(Alignment::Center);
         frame.render_widget(commands, areas[2]);
 
         if self.quit_dialog {
@@ -621,6 +622,15 @@ impl App {
             return;
         }
 
+        if self.focus == Focus::Textbox
+            && key_event.code == KeyCode::Enter
+            && key_event.modifiers.contains(KeyModifiers::CONTROL)
+            && self.has_publishable_text()
+        {
+            self.open_publish_dialog(PublishTarget::Post);
+            return;
+        }
+
         if self.focus == Focus::Textbox && key_event.modifiers.contains(KeyModifiers::CONTROL) {
             match key_event.code {
                 KeyCode::Char('z') => {
@@ -954,6 +964,16 @@ mod tests {
             row: 2,
             modifiers: KeyModifiers::NONE,
         });
+        assert!(matches!(app.publish_dialog, Some(PublishTarget::Post)));
+    }
+
+    #[test]
+    fn ctrl_enter_opens_post_confirmation_from_textbox() {
+        let mut app = App::default();
+        app.textarea.insert_str("post");
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
+
         assert!(matches!(app.publish_dialog, Some(PublishTarget::Post)));
     }
 
