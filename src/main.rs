@@ -167,7 +167,7 @@ impl App {
         };
 
         let commands = Paragraph::new(
-            "F1 Help   Ctrl+U Undo   Ctrl+R Redo   Tab/Shift+Tab Navigate   Enter/Space Select   Esc Quit",
+            "F1 Help   Ctrl+Z Undo   Ctrl+Y Redo   Ctrl+V Paste   Tab/Shift+Tab Navigate   Enter/Space Select   Esc Quit",
         )
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Center);
@@ -446,12 +446,16 @@ impl App {
 
         if self.focus == Focus::Textbox && key_event.modifiers.contains(KeyModifiers::CONTROL) {
             match key_event.code {
-                KeyCode::Char('u') => {
+                KeyCode::Char('z') => {
                     self.textarea.undo();
                     return;
                 }
-                KeyCode::Char('r') => {
+                KeyCode::Char('y') => {
                     self.textarea.redo();
+                    return;
+                }
+                KeyCode::Char('v') => {
+                    self.textarea.paste();
                     return;
                 }
                 _ => {}
@@ -633,20 +637,33 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_u_undoes_and_ctrl_r_redoes() {
+    fn ctrl_z_undoes_and_ctrl_y_redoes() {
         let mut app = App::default();
         app.textarea.insert_str("draft");
 
         app.clear_input();
         assert!(app.textarea.is_empty());
 
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('z'), KeyModifiers::CONTROL));
         assert_eq!(app.textarea.lines(), ["draft"]);
 
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
 
         assert!(app.textarea.is_empty());
         assert_eq!(app.focus, Focus::Textbox);
+    }
+
+    #[test]
+    fn ctrl_v_pastes_from_the_textarea_yank_buffer() {
+        let mut app = App::default();
+        app.textarea.insert_str("draft");
+        app.textarea.select_all();
+        app.textarea.copy();
+        app.clear_input();
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('v'), KeyModifiers::CONTROL));
+
+        assert_eq!(app.textarea.lines(), ["draft"]);
     }
 
     #[test]
