@@ -1,4 +1,4 @@
-use std::{io, time::Duration};
+use std::{fs, io, time::Duration};
 
 use crossterm::{
     event::{
@@ -61,6 +61,7 @@ struct App {
     help_textarea: TextArea<'static>,
     publish_dialog: Option<PublishTarget>,
     publish_dialog_focus: PublishDialogFocus,
+    micropub_api_url: Option<String>,
     control_areas: ControlAreas,
     quit_dialog_areas: QuitDialogAreas,
     publish_dialog_areas: PublishDialogAreas,
@@ -134,11 +135,28 @@ impl Default for App {
             help_textarea,
             publish_dialog: None,
             publish_dialog_focus: PublishDialogFocus::Cancel,
+            micropub_api_url: load_micropub_api_url(),
             control_areas: ControlAreas::default(),
             quit_dialog_areas: QuitDialogAreas::default(),
             publish_dialog_areas: PublishDialogAreas::default(),
         }
     }
+}
+
+/// Read the Micropub API endpoint from ~/.config/mp/config.toml, returning
+/// the `[service] api_url` value if it is configured and non-empty. The
+/// leading `http://` or `https://` protocol prefix is stripped.
+fn load_micropub_api_url() -> Option<String> {
+    let config_path = std::env::home_dir()?.join(".config/mp/config.toml");
+    let config_content = fs::read_to_string(config_path).ok()?;
+    let config: toml::Table = config_content.parse().ok()?;
+    let api_url = config.get("service")?.get("api_url")?.as_str()?.trim();
+    let api_url = api_url
+        .strip_prefix("https://")
+        .or_else(|| api_url.strip_prefix("http://"))
+        .unwrap_or(api_url);
+    let api_url = api_url.to_string();
+    (!api_url.is_empty()).then_some(api_url)
 }
 
 impl App {
@@ -169,7 +187,8 @@ impl App {
         .split(frame.area());
 
         let header_areas = Layout::horizontal([
-            Constraint::Min(1),
+            Constraint::Length(6),
+            Constraint::Min(10),
             Constraint::Length(8),
             Constraint::Length(9),
             Constraint::Length(17),
@@ -188,24 +207,36 @@ impl App {
             .alignment(Alignment::Left)
             .block(Block::default().padding(Padding::new(1, 1, 1, 1)));
         frame.render_widget(label, header_areas[0]);
-        self.render_button(frame, header_areas[1], "Help", Focus::HelpButton);
+        let (endpoint_text, endpoint_style) = match &self.micropub_api_url {
+            Some(api_url) => (api_url.as_str(), Style::default().fg(Color::DarkGray)),
+            None => (
+                "No MicroPub Endpoint Configured!",
+                Style::default().fg(Color::Red),
+            ),
+        };
+        let endpoint = Paragraph::new(endpoint_text)
+            .style(endpoint_style)
+            .alignment(Alignment::Left)
+            .block(Block::default().padding(Padding::new(1, 1, 1, 1)));
+        frame.render_widget(endpoint, header_areas[1]);
+        self.render_button(frame, header_areas[2], "Help", Focus::HelpButton);
         self.render_button_with_enabled(
             frame,
-            header_areas[2],
+            header_areas[3],
             "Clear",
             Focus::ClearButton,
             can_clear,
         );
         self.render_button_with_enabled(
             frame,
-            header_areas[3],
+            header_areas[4],
             "Publish Draft",
             Focus::SaveDraftButton,
             can_publish,
         );
         self.render_button_with_enabled(
             frame,
-            header_areas[4],
+            header_areas[5],
             "Publish Post",
             Focus::PostButton,
             can_publish,
@@ -239,10 +270,10 @@ impl App {
 
         self.control_areas = ControlAreas {
             textbox: editor_area,
-            help_button: header_areas[1],
-            clear_button: header_areas[2],
-            save_draft_button: header_areas[3],
-            post_button: header_areas[4],
+            help_button: header_areas[2],
+            clear_button: header_areas[3],
+            save_draft_button: header_areas[4],
+            post_button: header_areas[5],
         };
 
         let commands = Paragraph::new(
