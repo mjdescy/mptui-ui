@@ -7,6 +7,7 @@ use crossterm::{
     },
     execute,
 };
+use mplib::{publish_post, MicropubService, Post, PostStatus};
 use ratatui::{
     layout::{Alignment, Constraint, Layout, Position, Rect},
     style::{Color, Modifier, Style},
@@ -50,6 +51,48 @@ enum PublishDialogFocus {
     Publish,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AlertKind {
+    Published,
+    Error,
+}
+
+#[derive(Clone, PartialEq, Eq)]
+struct Alert {
+    kind: AlertKind,
+    message: String,
+}
+
+impl Alert {
+    fn published(message: String) -> Self {
+        Self {
+            kind: AlertKind::Published,
+            message,
+        }
+    }
+
+    fn error(message: String) -> Self {
+        Self {
+            kind: AlertKind::Error,
+            message,
+        }
+    }
+
+    fn title(&self) -> &'static str {
+        match self.kind {
+            AlertKind::Published => " Published ",
+            AlertKind::Error => " Error ",
+        }
+    }
+
+    fn border_color(&self) -> Color {
+        match self.kind {
+            AlertKind::Published => Color::Cyan,
+            AlertKind::Error => Color::Red,
+        }
+    }
+}
+
 struct App {
     textarea: TextArea<'static>,
     focus: Focus,
@@ -61,10 +104,15 @@ struct App {
     help_textarea: TextArea<'static>,
     publish_dialog: Option<PublishTarget>,
     publish_dialog_focus: PublishDialogFocus,
+    publishing: Option<PublishTarget>,
+    alert: Option<Alert>,
     micropub_api_url: Option<String>,
+    micropub_service: Option<MicropubService>,
+    extract_title: bool,
     control_areas: ControlAreas,
     quit_dialog_areas: QuitDialogAreas,
     publish_dialog_areas: PublishDialogAreas,
+    alert_button_area: Rect,
 }
 
 #[derive(Default)]
@@ -109,6 +157,7 @@ impl Default for App {
             "C / Esc         Cancel".to_string(),
             "D / Q           Discard and quit".to_string(),
             "P               Publish".to_string(),
+            "O               OK (publishing dialog)".to_string(),
         ]);
         help_textarea.set_cursor_render_mode(CursorRenderMode::Hidden);
         help_textarea.set_wrap_mode(WrapMode::WordOrGlyph);
@@ -124,6 +173,8 @@ impl Default for App {
             0,
         );
 
+        let settings = load_micropub_settings();
+
         Self {
             textarea,
             focus: Focus::Textbox,
@@ -135,28 +186,106 @@ impl Default for App {
             help_textarea,
             publish_dialog: None,
             publish_dialog_focus: PublishDialogFocus::Cancel,
-            micropub_api_url: load_micropub_api_url(),
+            publishing: None,
+            alert: None,
+            micropub_api_url: settings.api_url_display,
+            micropub_service: settings.service,
+            extract_title: settings.extract_title,
             control_areas: ControlAreas::default(),
             quit_dialog_areas: QuitDialogAreas::default(),
             publish_dialog_areas: PublishDialogAreas::default(),
+            alert_button_area: Rect::default(),
         }
     }
 }
 
-/// Read the Micropub API endpoint from ~/.config/mp/config.toml, returning
-/// the `[service] api_url` value if it is configured and non-empty. The
-/// leading `http://` or `https://` protocol prefix is stripped.
-fn load_micropub_api_url() -> Option<String> {
-    let config_path = std::env::home_dir()?.join(".config/mp/config.toml");
-    let config_content = fs::read_to_string(config_path).ok()?;
-    let config: toml::Table = config_content.parse().ok()?;
-    let api_url = config.get("service")?.get("api_url")?.as_str()?.trim();
-    let api_url = api_url
-        .strip_prefix("https://")
-        .or_else(|| api_url.strip_prefix("http://"))
-        .unwrap_or(api_url);
-    let api_url = api_url.to_string();
-    (!api_url.is_empty()).then_some(api_url)
+/// Micropub settings loaded from ~/.config/mp/config.toml.
+#[derive(Default)]
+struct MicropubSettings {
+    /// API URL with any http(s):// protocol prefix stripped, for display in the header.
+    api_url_display: Option<String>,
+    /// Service used to publish; present when both api_url and auth_token are configured.
+    service: Option<MicropubService>,
+    /// Whether to extract a title from a leading markdown header, per [default_behavior].
+    extract_title: bool,
+}
+
+/// Read the Micropub settings from ~/.config/mp/config.toml.
+fn load_micropub_settings() -> MicropubSettings {
+    let mut settings = MicropubSettings::default();
+
+    let Some(config_path) = std::env::home_dir().map(|home| home.join(".config/mp/config.toml"))
+    else {
+        return settings;
+    };
+    let Ok(config_content) = fs::read_to_string(config_path) else {
+        return settings;
+    };
+    let Ok(config) = config_content.parse::<toml::Table>() else {
+        return settings;
+    };
+
+    let read_service_value = |key: &str| {
+        config
+            .get("service")?
+            .get(key)?
+            .as_str()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+    };
+    let api_url = read_service_value("api_url");
+    let auth_token = read_service_value("auth_token");
+
+    if let Some(api_url) = api_url {
+        settings.api_url_display = Some(strip_url_protocol(&api_url).to_string());
+        if let Some(auth_token) = auth_token {
+            settings.service = MicropubService::from_args(api_url, auth_token).ok();
+        }
+    }
+
+    settings.extract_title = config
+        .get("default_behavior")
+        .and_then(|section| section.get("extract_title"))
+        .and_then(|value| value.as_bool())
+        .unwrap_or(false);
+
+    settings
+}
+
+/// Remove the leading `https://` or `http://` protocol prefix from a URL.
+fn strip_url_protocol(url: &str) -> &str {
+    url.strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(url)
+}
+
+/// Compute the centered dialog area used by the modal dialogs.
+fn centered_dialog_area(area: Rect) -> Rect {
+    let dialog_area = Layout::vertical([
+        Constraint::Percentage(30),
+        Constraint::Percentage(40),
+        Constraint::Percentage(30),
+    ])
+    .split(area)[1];
+    Layout::horizontal([
+        Constraint::Percentage(20),
+        Constraint::Percentage(60),
+        Constraint::Percentage(20),
+    ])
+    .split(dialog_area)[1]
+}
+
+/// Run the async mplib publish call to completion on a fresh runtime.
+/// Errors are returned as formatted strings since the caller only displays them.
+fn publish(service: &MicropubService, post: Post) -> Result<mplib::PostResult, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| format!("failed to start publish runtime: {e}"))?;
+    runtime
+        .block_on(publish_post(post, service))
+        .map_err(|e| e.to_string())
 }
 
 impl App {
@@ -187,7 +316,7 @@ impl App {
         .split(frame.area());
 
         let header_areas = Layout::horizontal([
-            Constraint::Length(6),
+            Constraint::Length(8),
             Constraint::Min(10),
             Constraint::Length(8),
             Constraint::Length(9),
@@ -287,6 +416,10 @@ impl App {
             self.draw_quit_dialog(frame);
         } else if self.publish_dialog.is_some() {
             self.draw_publish_dialog(frame);
+        } else if self.publishing.is_some() {
+            self.draw_publishing_dialog(frame);
+        } else if self.alert.is_some() {
+            self.draw_alert_dialog(frame);
         }
     }
 
@@ -367,6 +500,79 @@ impl App {
             "Publish",
             PublishDialogFocus::Publish,
         );
+    }
+
+    fn draw_publishing_dialog(&mut self, frame: &mut Frame) {
+        let target = self
+            .publishing
+            .expect("publishing dialog should have a target while rendering");
+        let title = match target {
+            PublishTarget::Draft => " Publishing Draft ",
+            PublishTarget::Post => " Publishing Post ",
+        };
+        let message = match target {
+            PublishTarget::Draft => "Publishing draft...",
+            PublishTarget::Post => "Publishing post...",
+        };
+        let dialog_area = centered_dialog_area(frame.area());
+
+        let dialog = Block::bordered()
+            .title(title)
+            .border_style(Style::default().fg(Color::Cyan));
+        let content_area = dialog.inner(dialog_area);
+        frame.render_widget(Clear, dialog_area);
+        frame.render_widget(dialog, dialog_area);
+
+        frame.render_widget(
+            Paragraph::new(message).alignment(Alignment::Center),
+            content_area,
+        );
+    }
+
+    fn draw_alert_dialog(&mut self, frame: &mut Frame) {
+        let alert = self
+            .alert
+            .clone()
+            .expect("alert dialog should have a message while rendering");
+        let dialog_area = centered_dialog_area(frame.area());
+
+        let dialog = Block::bordered()
+            .title(alert.title())
+            .border_style(Style::default().fg(alert.border_color()));
+        let content_area = dialog.inner(dialog_area);
+        frame.render_widget(Clear, dialog_area);
+        frame.render_widget(dialog, dialog_area);
+
+        let content = Layout::vertical([
+            Constraint::Min(1),
+            Constraint::Length(alert.message.lines().count() as u16),
+            Constraint::Min(1),
+            Constraint::Length(3),
+            Constraint::Min(1),
+        ])
+        .split(content_area);
+        frame.render_widget(
+            Paragraph::new(alert.message).alignment(Alignment::Center),
+            content[1],
+        );
+
+        let button_area = Layout::horizontal([Constraint::Length(10)])
+            .flex(ratatui::layout::Flex::Center)
+            .split(content[3])[0];
+        self.alert_button_area = button_area;
+        let style = Style::default()
+            .fg(Color::Black)
+            .bg(Color::Cyan)
+            .add_modifier(Modifier::BOLD);
+        let button = Paragraph::new("OK")
+            .alignment(Alignment::Center)
+            .style(style)
+            .block(
+                Block::bordered()
+                    .border_set(border::ROUNDED)
+                    .border_style(style),
+            );
+        frame.render_widget(button, button_area);
     }
 
     fn draw_quit_dialog(&mut self, frame: &mut Frame) {
@@ -510,6 +716,11 @@ impl App {
     }
 
     fn handle_events(&mut self) -> io::Result<()> {
+        if let Some(target) = self.publishing {
+            self.publish(target);
+            return Ok(());
+        }
+
         if event::poll(Duration::from_millis(250))? {
             match event::read()? {
                 Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
@@ -527,6 +738,10 @@ impl App {
     }
 
     fn handle_mouse_event(&mut self, mouse_event: MouseEvent) {
+        if self.alert.is_some() {
+            self.handle_alert_mouse_event(mouse_event);
+            return;
+        }
         if self.quit_dialog {
             self.handle_quit_dialog_mouse_event(mouse_event);
             return;
@@ -604,6 +819,10 @@ impl App {
     }
 
     fn handle_key_event(&mut self, key_event: KeyEvent) {
+        if self.alert.is_some() {
+            self.handle_alert_key_event(key_event);
+            return;
+        }
         if self.quit_dialog {
             self.handle_quit_dialog_key_event(key_event);
             return;
@@ -751,8 +970,70 @@ impl App {
         match self.publish_dialog_focus {
             PublishDialogFocus::Cancel => self.publish_dialog = None,
             PublishDialogFocus::Publish => {
+                let target = self.publish_dialog;
                 self.publish_dialog = None;
+                self.publishing = target;
                 self.focus = Focus::Textbox;
+            }
+        }
+    }
+
+    fn handle_alert_key_event(&mut self, key_event: KeyEvent) {
+        match key_event.code {
+            KeyCode::Esc | KeyCode::Enter | KeyCode::Char(' ') | KeyCode::Char('o' | 'O') => {
+                self.alert = None;
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_alert_mouse_event(&mut self, mouse_event: MouseEvent) {
+        let position = Position::new(mouse_event.column, mouse_event.row);
+        if mouse_event.kind == MouseEventKind::Down(MouseButton::Left)
+            && self.alert_button_area.contains(position)
+        {
+            self.alert = None;
+        }
+    }
+
+    /// Publish the textarea content to the configured Micropub endpoint.
+    /// On success the textarea is cleared and an alert confirms the publish;
+    /// on failure the content is kept and the alert reports the error.
+    fn publish(&mut self, target: PublishTarget) {
+        self.publishing = None;
+
+        let Some(service) = &self.micropub_service else {
+            self.alert = Some(Alert::error(
+                "No Micropub endpoint configured. Cannot publish.".to_string(),
+            ));
+            return;
+        };
+
+        let body = self.textarea.lines().join("\n");
+        let status = match target {
+            PublishTarget::Draft => PostStatus::Draft,
+            PublishTarget::Post => PostStatus::Published,
+        };
+        let post = if self.extract_title {
+            Post::from_body_with_title_extraction(body, status)
+        } else {
+            Post::from_body(body, status)
+        };
+
+        let noun = match target {
+            PublishTarget::Draft => "Draft",
+            PublishTarget::Post => "Post",
+        };
+        match publish(service, post) {
+            Ok(result) => {
+                self.clear_input();
+                self.alert = Some(Alert::published(format!(
+                    "{noun} published successfully.\nURL: {}",
+                    result.url
+                )));
+            }
+            Err(e) => {
+                self.alert = Some(Alert::error(format!("Failed to publish {noun}: {e}")));
             }
         }
     }
@@ -1056,5 +1337,71 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         });
         assert!(!app.help_sidebar);
+    }
+
+    #[test]
+    fn confirming_publish_starts_publishing_state() {
+        let mut app = App::default();
+        app.textarea.insert_str("draft");
+        app.open_publish_dialog(PublishTarget::Draft);
+
+        app.publish_dialog_focus = PublishDialogFocus::Publish;
+        app.activate_publish_dialog_focus();
+
+        assert!(app.publish_dialog.is_none());
+        assert!(matches!(app.publishing, Some(PublishTarget::Draft)));
+        assert_eq!(app.focus, Focus::Textbox);
+        assert!(app.alert.is_none());
+    }
+
+    #[test]
+    fn publishing_without_configured_endpoint_alerts_and_keeps_text() {
+        let mut app = App::default();
+        app.textarea.insert_str("draft");
+        app.micropub_service = None;
+
+        app.publish(PublishTarget::Post);
+
+        assert!(app.alert.is_some());
+        assert_eq!(app.alert.as_ref().map(|a| a.kind), Some(AlertKind::Error));
+        assert_eq!(app.textarea.lines(), ["draft"]);
+        assert!(app.publishing.is_none());
+    }
+
+    #[test]
+    fn alert_key_and_mouse_input_dismiss_the_dialog() {
+        let mut app = App::default();
+        app.alert = Some(Alert::published("Post published successfully.".to_string()));
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+        assert!(app.alert.is_some());
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(app.alert.is_none());
+
+        app.alert = Some(Alert::published(
+            "Draft published successfully.".to_string(),
+        ));
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.alert.is_none());
+
+        app.alert = Some(Alert::error("Failed to publish post.".to_string()));
+        app.alert_button_area = Rect::new(10, 10, 6, 3);
+        app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 11,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(app.alert.is_none());
+
+        app.alert = Some(Alert::error("Failed to publish post.".to_string()));
+        app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 0,
+            row: 0,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(app.alert.is_some());
     }
 }
