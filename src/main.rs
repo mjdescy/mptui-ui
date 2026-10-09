@@ -8,11 +8,11 @@ use crossterm::{
     execute,
 };
 use ratatui::{
-    DefaultTerminal, Frame,
     layout::{Alignment, Constraint, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     symbols::border,
     widgets::{Block, Clear, Padding, Paragraph},
+    DefaultTerminal, Frame,
 };
 use tui_textarea::{CursorRenderMode, TextArea, WrapMode};
 
@@ -92,25 +92,36 @@ impl Default for App {
         let mut textarea = TextArea::default();
         textarea.set_wrap_mode(WrapMode::WordOrGlyph);
         let mut help_textarea = TextArea::new(vec![
-            "Keyboard shortcuts".to_string(),
+            "Editor shortcuts".to_string(),
             "F1 / Help       Toggle shortcuts".to_string(),
             "Tab             Next control".to_string(),
             "Shift+Tab       Previous control".to_string(),
             "Enter / Space   Activate control".to_string(),
             "Ctrl+Enter      Publish post".to_string(),
-            "Alt+Ctrl+Enter   Publish draft".to_string(),
+            "Alt+Ctrl+Enter  Publish draft".to_string(),
             "Ctrl+Z          Undo".to_string(),
             "Ctrl+Y          Redo".to_string(),
             "Ctrl+V          Paste".to_string(),
             "Esc / Ctrl+Q    Quit".to_string(),
             "".to_string(),
-            "Dialog shortcuts".to_string(),
+            "Confirmation dialog shortcuts".to_string(),
             "C / Esc         Cancel".to_string(),
             "D / Q           Discard and quit".to_string(),
             "P               Publish".to_string(),
         ]);
         help_textarea.set_cursor_render_mode(CursorRenderMode::Hidden);
         help_textarea.set_wrap_mode(WrapMode::WordOrGlyph);
+        let confirmation_row = help_textarea
+            .lines()
+            .iter()
+            .position(|line| line == "Confirmation dialog shortcuts")
+            .expect("help text should contain the confirmation section header");
+        let confirmation_len = help_textarea.lines()[confirmation_row].chars().count();
+        help_textarea.custom_highlight(
+            ((confirmation_row, 0), (confirmation_row, confirmation_len)),
+            Style::default().add_modifier(Modifier::UNDERLINED),
+            0,
+        );
 
         Self {
             textarea,
