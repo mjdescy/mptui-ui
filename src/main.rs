@@ -231,6 +231,7 @@ impl App {
         self.textarea.set_block(
             Block::bordered()
                 .border_set(border::ROUNDED)
+                .title(" Blog Post ")
                 .border_style(textbox_style),
         );
         frame.render_widget(&self.textarea, editor_area);
