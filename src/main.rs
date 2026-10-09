@@ -232,6 +232,7 @@ impl App {
             Block::bordered()
                 .border_set(border::ROUNDED)
                 .title(" Blog Post ")
+                .padding(Padding::horizontal(1))
                 .border_style(textbox_style),
         );
         frame.render_widget(&self.textarea, editor_area);
@@ -265,6 +266,7 @@ impl App {
             Block::bordered()
                 .border_set(border::ROUNDED)
                 .title(" Keyboard Shortcuts ")
+                .padding(Padding::horizontal(1))
                 .border_style(Style::default().fg(Color::DarkGray)),
         );
         frame.render_widget(&self.help_textarea, area);
