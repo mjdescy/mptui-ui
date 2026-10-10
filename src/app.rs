@@ -23,7 +23,7 @@ use ratatui::{
     symbols::border,
     widgets::{Block, Clear, Padding, Paragraph, Wrap},
 };
-use tui_textarea::{CursorRenderMode, TextArea, WrapMode};
+use tui_textarea::{CursorRenderMode, Scrolling, TextArea, WrapMode};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Focus {
@@ -123,6 +123,7 @@ struct ControlAreas {
     clear_button: Rect,
     save_draft_button: Rect,
     post_button: Rect,
+    help_sidebar: Rect,
 }
 
 #[derive(Default)]
@@ -171,6 +172,7 @@ impl App {
             "Ctrl+Y          Redo".to_string(),
             "Ctrl+V          Paste".to_string(),
             "Esc / Ctrl+Q    Quit".to_string(),
+            "PgUp / PgDn     Scroll shortcuts".to_string(),
             "Autosave        Draft autosaved locally".to_string(),
             "".to_string(),
             "Confirmation dialog shortcuts".to_string(),
@@ -359,15 +361,15 @@ impl App {
         } else {
             Style::default().fg(Color::DarkGray)
         };
-        let editor_area = if self.help_sidebar {
+        let (editor_area, help_sidebar_area) = if self.help_sidebar {
             let columns =
                 Layout::horizontal([Constraint::Percentage(70), Constraint::Percentage(30)])
                     .spacing(1)
                     .split(areas[1]);
             self.draw_help_sidebar(frame, columns[1]);
-            columns[0]
+            (columns[0], columns[1])
         } else {
-            areas[1]
+            (areas[1], Rect::default())
         };
 
         self.textarea.set_cursor_line_style(Style::default());
@@ -386,6 +388,7 @@ impl App {
             clear_button: header_areas[3],
             save_draft_button: header_areas[4],
             post_button: header_areas[5],
+            help_sidebar: help_sidebar_area,
         };
 
         let commands = Paragraph::new(
@@ -427,6 +430,20 @@ impl App {
                 .border_style(Style::default().fg(Color::DarkGray)),
         );
         frame.render_widget(&self.help_textarea, area);
+    }
+
+    /// Show or hide the shortcuts sidebar. Opening resets the scroll to the
+    /// top so the first shortcuts are always visible.
+    fn set_help_sidebar(&mut self, open: bool) {
+        self.help_sidebar = open;
+        if open {
+            // A large negative delta; tui-textarea clamps at the first line.
+            // (i16::MIN itself would overflow the library's negation.)
+            self.help_textarea.scroll(Scrolling::Delta {
+                rows: -1000,
+                cols: 0,
+            });
+        }
     }
 
     fn draw_publish_dialog(&mut self, frame: &mut Frame) {
@@ -733,6 +750,21 @@ impl App {
         }
 
         let position = Position::new(mouse_event.column, mouse_event.row);
+        if self.help_sidebar && self.control_areas.help_sidebar.contains(position) {
+            match mouse_event.kind {
+                MouseEventKind::ScrollDown => {
+                    self.help_textarea
+                        .scroll(Scrolling::Delta { rows: 3, cols: 0 });
+                    return;
+                }
+                MouseEventKind::ScrollUp => {
+                    self.help_textarea
+                        .scroll(Scrolling::Delta { rows: -3, cols: 0 });
+                    return;
+                }
+                _ => {}
+            }
+        }
         let can_clear = !self.textarea.is_empty();
         let can_publish = self.has_publishable_text();
         self.hovered = if self.control_areas.help_button.contains(position) {
@@ -756,7 +788,8 @@ impl App {
         if mouse_event.kind == MouseEventKind::Down(MouseButton::Left) {
             if self.control_areas.help_button.contains(position) {
                 self.focus = Focus::HelpButton;
-                self.help_sidebar = !self.help_sidebar;
+                let open = !self.help_sidebar;
+                self.set_help_sidebar(open);
             } else if can_clear && self.control_areas.clear_button.contains(position) {
                 self.clear_input();
             } else if can_publish && self.control_areas.save_draft_button.contains(position) {
@@ -825,13 +858,28 @@ impl App {
         }
 
         if key_event.code == KeyCode::F(1) {
-            self.help_sidebar = !self.help_sidebar;
+            let open = !self.help_sidebar;
+            self.set_help_sidebar(open);
             return;
         }
 
         if key_event.code == KeyCode::F(2) {
             self.reload_settings();
             return;
+        }
+
+        if self.help_sidebar {
+            match key_event.code {
+                KeyCode::PageDown => {
+                    self.help_textarea.scroll(Scrolling::PageDown);
+                    return;
+                }
+                KeyCode::PageUp => {
+                    self.help_textarea.scroll(Scrolling::PageUp);
+                    return;
+                }
+                _ => {}
+            }
         }
 
         if self.focus == Focus::Textbox
@@ -890,7 +938,8 @@ impl App {
                 self.open_publish_dialog(PublishTarget::Post);
             }
             KeyCode::Enter | KeyCode::Char(' ') if self.focus == Focus::HelpButton => {
-                self.help_sidebar = !self.help_sidebar;
+                let open = !self.help_sidebar;
+                self.set_help_sidebar(open);
             }
             _ if self.focus == Focus::Textbox => {
                 self.textarea.input(key_event);
@@ -1477,6 +1526,164 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         });
         assert!(!app.help_sidebar);
+    }
+
+    /// Render the help sidebar into an off-screen buffer and return the
+    /// visible row texts. Rendering also establishes the viewport height
+    /// that `Scrolling::PageDown/Up` page by.
+    fn rendered_help_rows(app: &mut App) -> Vec<String> {
+        use ratatui::{buffer::Buffer, widgets::Widget as _};
+
+        let area = Rect::new(0, 0, 40, 8);
+        let mut buffer = Buffer::empty(area);
+        (&app.help_textarea).render(area, &mut buffer);
+        (0..area.height)
+            .map(|y| {
+                (0..area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect()
+            })
+            .collect()
+    }
+
+    #[test]
+    fn page_down_and_up_scroll_the_help_sidebar() {
+        let mut app = App::new(MicropubSettings::default(), None, None);
+        app.set_help_sidebar(true);
+
+        let rows = rendered_help_rows(&mut app);
+        assert!(
+            rows[0].contains("Editor shortcuts"),
+            "unexpected top row: {}",
+            rows[0]
+        );
+
+        app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        let rows = rendered_help_rows(&mut app);
+        assert!(
+            !rows[0].contains("Editor shortcuts"),
+            "PageDown should move the first shortcuts out of view"
+        );
+
+        // Repeated paging reaches the bottom of the shortcuts.
+        for _ in 0..5 {
+            app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        }
+        let rows = rendered_help_rows(&mut app);
+        assert!(
+            rows.iter()
+                .any(|row| row.contains("OK (publishing dialog)")),
+            "PageDown should reach the last shortcuts: {rows:?}"
+        );
+
+        // Repeated paging returns to the top.
+        for _ in 0..5 {
+            app.handle_key_event(KeyEvent::new(KeyCode::PageUp, KeyModifiers::NONE));
+        }
+        let rows = rendered_help_rows(&mut app);
+        assert!(
+            rows[0].contains("Editor shortcuts"),
+            "PageUp should return to the first shortcuts: {}",
+            rows[0]
+        );
+    }
+
+    #[test]
+    fn page_keys_scroll_only_while_the_sidebar_is_open() {
+        let mut app = App::new(MicropubSettings::default(), None, None);
+        app.textarea.insert_str("editor text");
+
+        app.handle_key_event(KeyEvent::new(KeyCode::PageDown, KeyModifiers::NONE));
+        assert_eq!(app.help_textarea.cursor(), (0, 0));
+    }
+
+    #[test]
+    fn wheel_over_the_sidebar_scrolls_it() {
+        let mut app = App::new(MicropubSettings::default(), None, None);
+        app.set_help_sidebar(true);
+        let rows = rendered_help_rows(&mut app);
+        assert!(rows[0].contains("Editor shortcuts"));
+        app.control_areas.help_sidebar = Rect::new(50, 5, 20, 10);
+
+        let wheel_at = |kind, column, row| MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        };
+        app.handle_mouse_event(wheel_at(MouseEventKind::ScrollDown, 55, 7));
+        let rows = rendered_help_rows(&mut app);
+        assert!(
+            !rows[0].contains("Editor shortcuts"),
+            "wheel down should scroll the shortcuts: {}",
+            rows[0]
+        );
+
+        app.handle_mouse_event(wheel_at(MouseEventKind::ScrollUp, 55, 7));
+        let rows = rendered_help_rows(&mut app);
+        assert!(
+            rows[0].contains("Editor shortcuts"),
+            "wheel up should scroll back: {}",
+            rows[0]
+        );
+
+        // Wheel outside the sidebar leaves the scroll position alone.
+        app.handle_mouse_event(wheel_at(MouseEventKind::ScrollDown, 55, 7));
+        let rows = rendered_help_rows(&mut app);
+        assert!(!rows[0].contains("Editor shortcuts"));
+        app.handle_mouse_event(wheel_at(MouseEventKind::ScrollDown, 0, 0));
+        let scrolled = rendered_help_rows(&mut app);
+        assert_eq!(rows, scrolled);
+    }
+
+    #[test]
+    fn opening_the_sidebar_resets_the_scroll() {
+        let mut app = App::new(MicropubSettings::default(), None, None);
+        app.set_help_sidebar(true);
+        rendered_help_rows(&mut app);
+        app.help_textarea
+            .scroll(Scrolling::Delta { rows: 10, cols: 0 });
+        let rows = rendered_help_rows(&mut app);
+        assert!(!rows[0].contains("Editor shortcuts"));
+
+        // Close and reopen with F1: the scroll resets to the top.
+        app.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+        assert!(!app.help_sidebar);
+        app.handle_key_event(KeyEvent::new(KeyCode::F(1), KeyModifiers::NONE));
+        assert!(app.help_sidebar);
+        let rows = rendered_help_rows(&mut app);
+        assert!(
+            rows[0].contains("Editor shortcuts"),
+            "reopening should reset to the top: {}",
+            rows[0]
+        );
+
+        // The mouse toggle resets too.
+        app.help_textarea
+            .scroll(Scrolling::Delta { rows: 10, cols: 0 });
+        let rows = rendered_help_rows(&mut app);
+        assert!(!rows[0].contains("Editor shortcuts"));
+        app.control_areas.help_button = Rect::new(10, 1, 10, 3);
+        app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(!app.help_sidebar);
+        app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 12,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(app.help_sidebar);
+        let rows = rendered_help_rows(&mut app);
+        assert!(
+            rows[0].contains("Editor shortcuts"),
+            "reopening should reset to the top: {}",
+            rows[0]
+        );
     }
 
     #[test]
