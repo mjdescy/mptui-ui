@@ -251,11 +251,11 @@ const HELP_SECTIONS: &[ShortcutSection] = &[
         title: " Editor ",
         rows: &[
             ShortcutRow {
-                keys: "F1 / Help",
+                keys: "F1",
                 action: "Toggle shortcuts",
             },
             ShortcutRow {
-                keys: "F2 / Reload",
+                keys: "F2",
                 action: "Reload config",
             },
             ShortcutRow {
@@ -267,7 +267,11 @@ const HELP_SECTIONS: &[ShortcutSection] = &[
                 action: "Previous control",
             },
             ShortcutRow {
-                keys: "Enter / Space",
+                keys: "Enter",
+                action: "Activate control",
+            },
+            ShortcutRow {
+                keys: "Space",
                 action: "Activate control",
             },
             ShortcutRow {
@@ -275,7 +279,7 @@ const HELP_SECTIONS: &[ShortcutSection] = &[
                 action: "Publish post",
             },
             ShortcutRow {
-                keys: "Alt+Ctrl+Enter",
+                keys: "Shift+Ctrl+Enter",
                 action: "Publish draft",
             },
             ShortcutRow {
@@ -291,12 +295,12 @@ const HELP_SECTIONS: &[ShortcutSection] = &[
                 action: "Paste",
             },
             ShortcutRow {
-                keys: "Esc / Ctrl+Q",
+                keys: "Esc",
                 action: "Quit",
             },
             ShortcutRow {
-                keys: "Autosave",
-                action: "Draft autosaved locally",
+                keys: "Ctrl+Q",
+                action: "Quit",
             },
         ],
     },
@@ -308,12 +312,16 @@ const HELP_SECTIONS: &[ShortcutSection] = &[
                 action: "Publish",
             },
             ShortcutRow {
-                keys: "C / Esc",
+                keys: "C",
+                action: "Cancel",
+            },
+            ShortcutRow {
+                keys: "Esc",
                 action: "Cancel",
             },
             ShortcutRow {
                 keys: "O",
-                action: "OK (after publishing)",
+                action: "OK",
             },
         ],
     },
@@ -321,11 +329,19 @@ const HELP_SECTIONS: &[ShortcutSection] = &[
         title: " Quit dialog ",
         rows: &[
             ShortcutRow {
-                keys: "D / Q",
+                keys: "D",
                 action: "Discard and quit",
             },
             ShortcutRow {
-                keys: "C / Esc",
+                keys: "Q",
+                action: "Discard and quit",
+            },
+            ShortcutRow {
+                keys: "C",
+                action: "Cancel",
+            },
+            ShortcutRow {
+                keys: "Esc",
                 action: "Cancel",
             },
         ],
@@ -489,7 +505,7 @@ impl App {
         };
 
         let commands = Paragraph::new(
-            "F1 Help  F2 Reload  Ctrl+Enter Publish Post  Alt+Ctrl+Enter Publish Draft  Esc Quit",
+            "F1 Help  F2 Reload  Ctrl+Enter Publish Post  Shift+Ctrl+Enter Publish Draft  Esc Quit",
         )
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Left);
@@ -538,9 +554,16 @@ impl App {
             .split(content[0]);
         let right = Layout::vertical([Constraint::Percentage(55), Constraint::Percentage(45)])
             .split(columns[1]);
+        // The Publish and Quit tables are three columns narrower than their
+        // area and hug its right edge.
+        let narrow_right = |area: Rect| Rect {
+            x: area.x.saturating_add(3),
+            width: area.width.saturating_sub(3),
+            ..area
+        };
         frame.render_widget(help_table(&HELP_SECTIONS[0]), columns[0]);
-        frame.render_widget(help_table(&HELP_SECTIONS[1]), right[0]);
-        frame.render_widget(help_table(&HELP_SECTIONS[2]), right[1]);
+        frame.render_widget(help_table(&HELP_SECTIONS[1]), narrow_right(right[0]));
+        frame.render_widget(help_table(&HELP_SECTIONS[2]), narrow_right(right[1]));
         frame.render_widget(
             Paragraph::new("Esc / F1 / Enter closes this dialog")
                 .alignment(Alignment::Center)
@@ -976,7 +999,7 @@ impl App {
 
         if self.focus == Focus::Textbox
             && key_event.code == KeyCode::Enter
-            && key_event.modifiers.contains(KeyModifiers::ALT)
+            && key_event.modifiers.contains(KeyModifiers::SHIFT)
             && key_event.modifiers.contains(KeyModifiers::CONTROL)
             && self.has_publishable_text()
         {
@@ -1558,13 +1581,13 @@ mod tests {
     }
 
     #[test]
-    fn alt_ctrl_enter_opens_draft_confirmation_from_textbox() {
+    fn shift_ctrl_enter_opens_draft_confirmation_from_textbox() {
         let mut app = App::default();
         app.textarea.insert_str("draft");
 
         app.handle_key_event(KeyEvent::new(
             KeyCode::Enter,
-            KeyModifiers::ALT | KeyModifiers::CONTROL,
+            KeyModifiers::SHIFT | KeyModifiers::CONTROL,
         ));
 
         assert!(matches!(app.publish_dialog, Some(PublishTarget::Draft)));
