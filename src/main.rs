@@ -1,4 +1,9 @@
-use std::{fs, io, time::Duration};
+use std::{
+    fs, io,
+    path::PathBuf,
+    sync::mpsc,
+    time::{Duration, Instant},
+};
 
 use crossterm::{
     event::{
@@ -7,13 +12,13 @@ use crossterm::{
     },
     execute,
 };
-use mplib::{publish_post, MicropubService, Post, PostStatus};
+use mplib::{MicropubService, Post, PostStatus, publish_post};
 use ratatui::{
+    DefaultTerminal, Frame,
     layout::{Alignment, Constraint, Layout, Position, Rect},
     style::{Color, Modifier, Style},
     symbols::border,
     widgets::{Block, Clear, Padding, Paragraph},
-    DefaultTerminal, Frame,
 };
 use tui_textarea::{CursorRenderMode, TextArea, WrapMode};
 
@@ -50,6 +55,19 @@ enum PublishDialogFocus {
     Cancel,
     Publish,
 }
+
+/// Outcome of a background publish: the new post's result on success, or a
+/// message to display on failure.
+type PublishOutcome = Result<mplib::PostResult, String>;
+
+/// A publish request running on a worker thread.
+struct PublishJob {
+    target: PublishTarget,
+    receiver: mpsc::Receiver<PublishOutcome>,
+}
+
+/// Frames for the "Publishing..." spinner, advanced once per event-loop tick.
+const SPINNER_FRAMES: [&str; 4] = ["|", "/", "-", "\\"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AlertKind {
@@ -104,11 +122,16 @@ struct App {
     help_textarea: TextArea<'static>,
     publish_dialog: Option<PublishTarget>,
     publish_dialog_focus: PublishDialogFocus,
-    publishing: Option<PublishTarget>,
+    publish_job: Option<PublishJob>,
+    spinner_frame: usize,
     alert: Option<Alert>,
-    micropub_api_url: Option<String>,
-    micropub_service: Option<MicropubService>,
+    last_published: Option<String>,
+    endpoint: EndpointState,
+    service_api_url: Option<String>,
+    service_auth_token: Option<String>,
     extract_title: bool,
+    draft_path: Option<PathBuf>,
+    last_saved: String,
     control_areas: ControlAreas,
     quit_dialog_areas: QuitDialogAreas,
     publish_dialog_areas: PublishDialogAreas,
@@ -138,11 +161,20 @@ struct PublishDialogAreas {
 
 impl Default for App {
     fn default() -> Self {
+        Self::new(load_micropub_settings(), default_draft_path())
+    }
+}
+
+impl App {
+    /// Build an app with explicit settings and draft path. A `None` draft
+    /// path disables autosave, which keeps tests off the real filesystem.
+    fn new(settings: MicropubSettings, draft_path: Option<PathBuf>) -> Self {
         let mut textarea = TextArea::default();
         textarea.set_wrap_mode(WrapMode::WordOrGlyph);
         let mut help_textarea = TextArea::new(vec![
             "Editor shortcuts".to_string(),
             "F1 / Help       Toggle shortcuts".to_string(),
+            "F2 / Reload     Reload config".to_string(),
             "Tab             Next control".to_string(),
             "Shift+Tab       Previous control".to_string(),
             "Enter / Space   Activate control".to_string(),
@@ -152,6 +184,7 @@ impl Default for App {
             "Ctrl+Y          Redo".to_string(),
             "Ctrl+V          Paste".to_string(),
             "Esc / Ctrl+Q    Quit".to_string(),
+            "Autosave        Draft autosaved locally".to_string(),
             "".to_string(),
             "Confirmation dialog shortcuts".to_string(),
             "C / Esc         Cancel".to_string(),
@@ -173,8 +206,6 @@ impl Default for App {
             0,
         );
 
-        let settings = load_micropub_settings();
-
         Self {
             textarea,
             focus: Focus::Textbox,
@@ -186,11 +217,16 @@ impl Default for App {
             help_textarea,
             publish_dialog: None,
             publish_dialog_focus: PublishDialogFocus::Cancel,
-            publishing: None,
+            publish_job: None,
+            spinner_frame: 0,
             alert: None,
-            micropub_api_url: settings.api_url_display,
-            micropub_service: settings.service,
+            last_published: None,
+            endpoint: settings.endpoint,
+            service_api_url: settings.service_api_url,
+            service_auth_token: settings.service_auth_token,
             extract_title: settings.extract_title,
+            draft_path,
+            last_saved: String::new(),
             control_areas: ControlAreas::default(),
             quit_dialog_areas: QuitDialogAreas::default(),
             publish_dialog_areas: PublishDialogAreas::default(),
@@ -202,27 +238,78 @@ impl Default for App {
 /// Micropub settings loaded from ~/.config/mp/config.toml.
 #[derive(Default)]
 struct MicropubSettings {
-    /// API URL with any http(s):// protocol prefix stripped, for display in the header.
-    api_url_display: Option<String>,
-    /// Service used to publish; present when both api_url and auth_token are configured.
-    service: Option<MicropubService>,
+    /// Endpoint configuration state, driving the header display.
+    endpoint: EndpointState,
+    /// Full API URL used to publish; present when api_url is configured and non-empty.
+    service_api_url: Option<String>,
+    /// Auth token used to publish; present when auth_token is configured and non-empty.
+    service_auth_token: Option<String>,
     /// Whether to extract a title from a leading markdown header, per [default_behavior].
     extract_title: bool,
 }
 
-/// Read the Micropub settings from ~/.config/mp/config.toml.
-fn load_micropub_settings() -> MicropubSettings {
-    let mut settings = MicropubSettings::default();
+/// What the header endpoint display knows about the Micropub configuration.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+enum EndpointState {
+    /// Fully configured; carries the API URL with protocol prefix stripped.
+    Configured(String),
+    /// api_url is set but auth_token is missing or empty; carries the stripped URL.
+    MissingToken(String),
+    /// No api_url configured.
+    #[default]
+    Missing,
+    /// The config file could not be read; carries the OS error message.
+    ReadError(String),
+    /// The config file could not be parsed as TOML; carries the parse error.
+    ParseError(String),
+}
 
+/// Read the Micropub settings from ~/.config/mp/config.toml. A missing file
+/// is normal for first-time users and yields default (unconfigured) settings.
+fn load_micropub_settings() -> MicropubSettings {
     let Some(config_path) = std::env::home_dir().map(|home| home.join(".config/mp/config.toml"))
     else {
-        return settings;
+        return MicropubSettings::default();
     };
-    let Ok(config_content) = fs::read_to_string(config_path) else {
-        return settings;
-    };
-    let Ok(config) = config_content.parse::<toml::Table>() else {
-        return settings;
+    match fs::read_to_string(config_path) {
+        Ok(config_content) => parse_micropub_settings(&config_content),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => MicropubSettings::default(),
+        Err(e) => MicropubSettings {
+            endpoint: EndpointState::ReadError(e.to_string()),
+            ..Default::default()
+        },
+    }
+}
+
+/// Resolve the draft autosave path: `$XDG_STATE_HOME/mptui/draft.md`,
+/// falling back to `~/.local/state/mptui/draft.md`. Returns `None` when no
+/// usable base directory exists, which disables autosave.
+fn default_draft_path() -> Option<PathBuf> {
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::home_dir().map(|home| home.join(".local/state")))?;
+    Some(base.join("mptui/draft.md"))
+}
+
+/// Parse Micropub settings from the contents of an mp config file.
+///
+/// Kept free of file access so it can be unit tested without touching the
+/// user's real configuration.
+fn parse_micropub_settings(config_content: &str) -> MicropubSettings {
+    let mut settings = MicropubSettings::default();
+
+    let config: toml::Table = match config_content.parse() {
+        Ok(config) => config,
+        Err(e) => {
+            let first_line = e
+                .to_string()
+                .lines()
+                .next()
+                .unwrap_or("invalid TOML")
+                .to_string();
+            settings.endpoint = EndpointState::ParseError(first_line);
+            return settings;
+        }
     };
 
     let read_service_value = |key: &str| {
@@ -238,11 +325,15 @@ fn load_micropub_settings() -> MicropubSettings {
     let auth_token = read_service_value("auth_token");
 
     if let Some(api_url) = api_url {
-        settings.api_url_display = Some(strip_url_protocol(&api_url).to_string());
-        if let Some(auth_token) = auth_token {
-            settings.service = MicropubService::from_args(api_url, auth_token).ok();
-        }
+        let display = strip_url_protocol(&api_url).to_string();
+        settings.service_api_url = Some(api_url);
+        settings.endpoint = if auth_token.is_some() {
+            EndpointState::Configured(display)
+        } else {
+            EndpointState::MissingToken(display)
+        };
     }
+    settings.service_auth_token = auth_token;
 
     settings.extract_title = config
         .get("default_behavior")
@@ -258,6 +349,24 @@ fn strip_url_protocol(url: &str) -> &str {
     url.strip_prefix("https://")
         .or_else(|| url.strip_prefix("http://"))
         .unwrap_or(url)
+}
+
+/// Shorten text to at most `max_chars` characters, appending "..." when cut.
+fn truncate_end(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        text.to_string()
+    } else {
+        format!("{}...", text.chars().take(max_chars).collect::<String>())
+    }
+}
+
+/// Heuristic check for authentication failures in a publish error message.
+/// mplib reports them as e.g. "API error: unauthorized - ...".
+fn is_auth_failure(message: &str) -> bool {
+    let message = message.to_lowercase();
+    ["unauthorized", "invalid_token", "forbidden", "401", "403"]
+        .iter()
+        .any(|hint| message.contains(hint))
 }
 
 /// Compute the centered dialog area used by the modal dialogs.
@@ -276,21 +385,25 @@ fn centered_dialog_area(area: Rect) -> Rect {
     .split(dialog_area)[1]
 }
 
-/// Run the async mplib publish call to completion on a fresh runtime.
-/// Errors are returned as formatted strings since the caller only displays them.
-fn publish(service: &MicropubService, post: Post) -> Result<mplib::PostResult, String> {
+/// Publish a post to completion: rebuild the service, run the async mplib
+/// call on a fresh single-threaded runtime, and return the outcome.
+/// Intended as the body of the background publish worker thread.
+fn run_publish(api_url: String, auth_token: String, post: Post) -> PublishOutcome {
+    let service = MicropubService::from_args(api_url, auth_token)
+        .map_err(|e| format!("invalid Micropub configuration: {e}"))?;
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .map_err(|e| format!("failed to start publish runtime: {e}"))?;
     runtime
-        .block_on(publish_post(post, service))
+        .block_on(publish_post(post, &service))
         .map_err(|e| e.to_string())
 }
 
 impl App {
     fn run(mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         execute!(io::stdout(), event::EnableMouseCapture)?;
+        self.restore_draft();
 
         let result = self.run_loop(terminal);
         let disable_result = execute!(io::stdout(), event::DisableMouseCapture);
@@ -299,10 +412,22 @@ impl App {
     }
 
     fn run_loop(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
+        // Autosave at most ~once a second, and only when the text changed.
+        let mut last_autosave = Instant::now();
         while !self.should_quit {
             terminal.draw(|frame| self.draw(frame))?;
             self.handle_events()?;
+            if self.draft_path.is_some()
+                && self.draft_text() != self.last_saved
+                && last_autosave.elapsed() >= Duration::from_millis(750)
+            {
+                self.autosave_draft();
+                last_autosave = Instant::now();
+            }
         }
+        // Final save on the way out so nothing is lost between ticks.
+        // This is a no-op after publish, clear, or deliberate discard.
+        self.autosave_draft();
 
         Ok(())
     }
@@ -336,10 +461,20 @@ impl App {
             .alignment(Alignment::Left)
             .block(Block::default().padding(Padding::new(1, 1, 1, 1)));
         frame.render_widget(label, header_areas[0]);
-        let (endpoint_text, endpoint_style) = match &self.micropub_api_url {
-            Some(api_url) => (api_url.as_str(), Style::default().fg(Color::DarkGray)),
-            None => (
-                "No MicroPub Endpoint Configured!",
+        let (endpoint_text, endpoint_style): (String, Style) = match &self.endpoint {
+            EndpointState::Configured(api_url) => {
+                (api_url.clone(), Style::default().fg(Color::DarkGray))
+            }
+            EndpointState::MissingToken(api_url) => (
+                format!("{api_url} (no token)"),
+                Style::default().fg(Color::Yellow),
+            ),
+            EndpointState::Missing => (
+                "No MicroPub Endpoint Configured!".to_string(),
+                Style::default().fg(Color::Red),
+            ),
+            EndpointState::ReadError(message) | EndpointState::ParseError(message) => (
+                format!("Config error: {message}"),
                 Style::default().fg(Color::Red),
             ),
         };
@@ -406,17 +541,27 @@ impl App {
         };
 
         let commands = Paragraph::new(
-            "F1 Help   Ctrl+Enter Publish Post   Alt+Ctrl+Enter Publish Draft   Esc Quit",
+            "F1 Help  F2 Reload  Ctrl+Enter Publish Post  Alt+Ctrl+Enter Publish Draft  Esc Quit",
         )
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Center);
-        frame.render_widget(commands, areas[2]);
+        let status = self.status_text();
+        let status_width = ratatui::text::Line::from(status.as_str()).width() as u16;
+        let footer = Layout::horizontal([Constraint::Min(10), Constraint::Length(status_width)])
+            .split(areas[2]);
+        frame.render_widget(commands, footer[0]);
+        frame.render_widget(
+            Paragraph::new(status)
+                .style(Style::default().fg(Color::DarkGray))
+                .alignment(Alignment::Right),
+            footer[1],
+        );
 
         if self.quit_dialog {
             self.draw_quit_dialog(frame);
         } else if self.publish_dialog.is_some() {
             self.draw_publish_dialog(frame);
-        } else if self.publishing.is_some() {
+        } else if self.publish_job.is_some() {
             self.draw_publishing_dialog(frame);
         } else if self.alert.is_some() {
             self.draw_alert_dialog(frame);
@@ -504,16 +649,20 @@ impl App {
 
     fn draw_publishing_dialog(&mut self, frame: &mut Frame) {
         let target = self
-            .publishing
-            .expect("publishing dialog should have a target while rendering");
+            .publish_job
+            .as_ref()
+            .map(|job| job.target)
+            .expect("publishing dialog should have a job while rendering");
         let title = match target {
             PublishTarget::Draft => " Publishing Draft ",
             PublishTarget::Post => " Publishing Post ",
         };
-        let message = match target {
-            PublishTarget::Draft => "Publishing draft...",
-            PublishTarget::Post => "Publishing post...",
+        let noun = match target {
+            PublishTarget::Draft => "draft",
+            PublishTarget::Post => "post",
         };
+        let spinner = SPINNER_FRAMES[self.spinner_frame % SPINNER_FRAMES.len()];
+        let message = format!("Publishing {noun} {spinner}");
         let dialog_area = centered_dialog_area(frame.area());
 
         let dialog = Block::bordered()
@@ -716,12 +865,13 @@ impl App {
     }
 
     fn handle_events(&mut self) -> io::Result<()> {
-        if let Some(target) = self.publishing {
-            self.publish(target);
-            return Ok(());
+        if self.publish_job.is_some() {
+            self.poll_publish();
         }
 
-        if event::poll(Duration::from_millis(250))? {
+        // Tick faster while publishing so the spinner animates smoothly.
+        let poll_timeout = if self.publish_job.is_some() { 100 } else { 250 };
+        if event::poll(Duration::from_millis(poll_timeout))? {
             match event::read()? {
                 Event::Key(key_event) if key_event.kind == KeyEventKind::Press => {
                     self.handle_key_event(key_event);
@@ -738,6 +888,9 @@ impl App {
     }
 
     fn handle_mouse_event(&mut self, mouse_event: MouseEvent) {
+        if self.publish_job.is_some() {
+            return;
+        }
         if self.alert.is_some() {
             self.handle_alert_mouse_event(mouse_event);
             return;
@@ -819,6 +972,9 @@ impl App {
     }
 
     fn handle_key_event(&mut self, key_event: KeyEvent) {
+        if self.publish_job.is_some() {
+            return;
+        }
         if self.alert.is_some() {
             self.handle_alert_key_event(key_event);
             return;
@@ -842,6 +998,11 @@ impl App {
 
         if key_event.code == KeyCode::F(1) {
             self.help_sidebar = !self.help_sidebar;
+            return;
+        }
+
+        if key_event.code == KeyCode::F(2) {
+            self.reload_settings();
             return;
         }
 
@@ -961,6 +1122,7 @@ impl App {
             QuitDialogFocus::Cancel => self.quit_dialog = false,
             QuitDialogFocus::Discard => {
                 self.quit_dialog = false;
+                self.delete_autosave();
                 self.should_quit = true;
             }
         }
@@ -972,7 +1134,9 @@ impl App {
             PublishDialogFocus::Publish => {
                 let target = self.publish_dialog;
                 self.publish_dialog = None;
-                self.publishing = target;
+                if let Some(target) = target {
+                    self.start_publish(target);
+                }
                 self.focus = Focus::Textbox;
             }
         }
@@ -996,15 +1160,24 @@ impl App {
         }
     }
 
-    /// Publish the textarea content to the configured Micropub endpoint.
-    /// On success the textarea is cleared and an alert confirms the publish;
-    /// on failure the content is kept and the alert reports the error.
-    fn publish(&mut self, target: PublishTarget) {
-        self.publishing = None;
+    /// Start publishing the textarea content on a worker thread. The editor
+    /// stays responsive while the request is in flight; the outcome is
+    /// collected by `poll_publish`. Shows an error alert immediately when no
+    /// endpoint is configured.
+    fn start_publish(&mut self, target: PublishTarget) {
+        if self.publish_job.is_some() {
+            return;
+        }
 
-        let Some(service) = &self.micropub_service else {
+        let Some(api_url) = self.service_api_url.clone() else {
             self.alert = Some(Alert::error(
                 "No Micropub endpoint configured. Cannot publish.".to_string(),
+            ));
+            return;
+        };
+        let Some(auth_token) = self.service_auth_token.clone() else {
+            self.alert = Some(Alert::error(
+                "No Micropub auth token configured. Cannot publish.".to_string(),
             ));
             return;
         };
@@ -1020,20 +1193,54 @@ impl App {
             Post::from_body(body, status)
         };
 
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || {
+            let outcome = run_publish(api_url, auth_token, post);
+            let _ = sender.send(outcome);
+        });
+        self.publish_job = Some(PublishJob { target, receiver });
+    }
+
+    /// Check a running publish job without blocking and advance the spinner.
+    /// On completion the textarea is cleared and an alert confirms the
+    /// publish; on failure the content is kept and the alert reports the error.
+    fn poll_publish(&mut self) {
+        let Some((target, received)) = self
+            .publish_job
+            .as_ref()
+            .map(|job| (job.target, job.receiver.try_recv()))
+        else {
+            return;
+        };
+        self.spinner_frame = self.spinner_frame.wrapping_add(1);
+
         let noun = match target {
             PublishTarget::Draft => "Draft",
             PublishTarget::Post => "Post",
         };
-        match publish(service, post) {
-            Ok(result) => {
+        match received {
+            Ok(Ok(result)) => {
+                self.publish_job = None;
                 self.clear_input();
+                self.last_published = Some(result.url.clone());
                 self.alert = Some(Alert::published(format!(
                     "{noun} published successfully.\nURL: {}",
                     result.url
                 )));
             }
-            Err(e) => {
-                self.alert = Some(Alert::error(format!("Failed to publish {noun}: {e}")));
+            Ok(Err(message)) => {
+                self.publish_job = None;
+                // The token may have been rotated outside the app; pick up
+                // the current config so the next attempt uses fresh values.
+                if is_auth_failure(&message) {
+                    self.reload_settings();
+                }
+                self.alert = Some(Alert::error(format!("Failed to publish {noun}: {message}")));
+            }
+            Err(mpsc::TryRecvError::Empty) => {}
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.publish_job = None;
+                self.alert = Some(Alert::error("Publish ended unexpectedly.".to_string()));
             }
         }
     }
@@ -1048,10 +1255,26 @@ impl App {
     }
 
     fn open_publish_dialog(&mut self, target: PublishTarget) {
+        if self.publish_job.is_some() {
+            return;
+        }
         if self.has_publishable_text() {
             self.publish_dialog = Some(target);
             self.publish_dialog_focus = PublishDialogFocus::Cancel;
         }
+    }
+
+    /// Apply freshly loaded settings to the running app.
+    fn apply_settings(&mut self, settings: MicropubSettings) {
+        self.endpoint = settings.endpoint;
+        self.service_api_url = settings.service_api_url;
+        self.service_auth_token = settings.service_auth_token;
+        self.extract_title = settings.extract_title;
+    }
+
+    /// Re-read the config file, e.g. after the user edits it externally.
+    fn reload_settings(&mut self) {
+        self.apply_settings(load_micropub_settings());
     }
 
     fn has_publishable_text(&self) -> bool {
@@ -1064,7 +1287,83 @@ impl App {
     fn clear_input(&mut self) {
         self.textarea.select_all();
         self.textarea.cut();
+        self.delete_autosave();
         self.focus = Focus::Textbox;
+    }
+
+    /// Draft text currently in the editor.
+    fn draft_text(&self) -> String {
+        self.textarea.lines().join("\n")
+    }
+
+    /// Right-hand footer text: draft stats, cursor position, and publish state.
+    fn status_text(&self) -> String {
+        if self.publish_job.is_some() {
+            return "Publishing...".to_string();
+        }
+        let text = self.draft_text();
+        let words = text.split_whitespace().count();
+        let chars = text.chars().count();
+        let (row, col) = self.textarea.cursor();
+        let mut status = format!(
+            "Words: {words}  Chars: {chars}  Ln:{},Col:{}",
+            row + 1,
+            col + 1
+        );
+        if let Some(url) = &self.last_published {
+            status.push_str(&format!("  Last: {}", truncate_end(url, 32)));
+        }
+        status
+    }
+
+    /// Restore a previously autosaved draft, if any. Runs once at startup.
+    fn restore_draft(&mut self) {
+        let Some(path) = self.draft_path.as_ref() else {
+            return;
+        };
+        let Ok(saved) = fs::read_to_string(path) else {
+            return;
+        };
+        if saved.trim().is_empty() {
+            return;
+        }
+        self.textarea.insert_str(saved);
+        self.last_saved = self.draft_text();
+    }
+
+    /// Persist the current draft when it changed since the last save.
+    /// Failures are ignored: autosave must never interrupt editing.
+    fn autosave_draft(&mut self) {
+        let Some(path) = self.draft_path.clone() else {
+            return;
+        };
+        let text = self.draft_text();
+        if text.trim().is_empty() {
+            // Nothing to keep; drop any stale autosave.
+            let _ = fs::remove_file(&path);
+            self.last_saved = text;
+            return;
+        }
+        if text == self.last_saved {
+            return;
+        }
+        if let Some(parent) = path.parent()
+            && fs::create_dir_all(parent).is_err()
+        {
+            return;
+        }
+        if fs::write(&path, &text).is_ok() {
+            self.last_saved = text;
+        }
+    }
+
+    /// Delete the autosave file, if any. Used when the draft is published,
+    /// explicitly cleared, or deliberately discarded.
+    fn delete_autosave(&mut self) {
+        if let Some(path) = self.draft_path.as_ref() {
+            let _ = fs::remove_file(path);
+        }
+        self.last_saved = self.draft_text();
     }
 
     fn focus_next(&mut self) {
@@ -1133,6 +1432,7 @@ mod tests {
     #[test]
     fn discard_accelerator_and_mouse_button_quit_with_draft() {
         let mut app = App::default();
+        app.draft_path = None;
         app.textarea.insert_str("draft");
         app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
 
@@ -1142,6 +1442,7 @@ mod tests {
         assert!(!app.quit_dialog);
 
         let mut app = App::default();
+        app.draft_path = None;
         app.textarea.insert_str("draft");
         app.handle_key_event(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         app.quit_dialog_areas.discard_button = Rect::new(10, 10, 10, 3);
@@ -1223,6 +1524,9 @@ mod tests {
     fn publish_buttons_open_the_matching_confirmation_dialog() {
         let mut app = App::default();
         app.textarea.insert_str("draft");
+        // Never hit the network from tests: confirming must fail fast.
+        app.service_api_url = None;
+        app.service_auth_token = None;
 
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
@@ -1240,6 +1544,12 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
         assert!(app.publish_dialog.is_none());
         assert_eq!(app.focus, Focus::Textbox);
+
+        // The unconfigured publish failed with a modal alert; dismiss it
+        // before continuing.
+        assert!(app.alert.is_some());
+        app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(app.alert.is_none());
 
         app.control_areas.post_button = Rect::new(10, 1, 16, 3);
         app.handle_mouse_event(MouseEvent {
@@ -1284,6 +1594,7 @@ mod tests {
     #[test]
     fn ctrl_z_undoes_and_ctrl_y_redoes() {
         let mut app = App::default();
+        app.draft_path = None;
         app.textarea.insert_str("draft");
 
         app.clear_input();
@@ -1301,6 +1612,7 @@ mod tests {
     #[test]
     fn ctrl_v_pastes_from_the_textarea_yank_buffer() {
         let mut app = App::default();
+        app.draft_path = None;
         app.textarea.insert_str("draft");
         app.textarea.select_all();
         app.textarea.copy();
@@ -1340,32 +1652,278 @@ mod tests {
     }
 
     #[test]
-    fn confirming_publish_starts_publishing_state() {
+    fn confirming_publish_starts_background_job() {
         let mut app = App::default();
         app.textarea.insert_str("draft");
+        // Point at an unroutable address so the worker fails fast
+        // without touching the network.
+        app.service_api_url = Some("http://127.0.0.1:9/micropub".to_string());
+        app.service_auth_token = Some("test-token".to_string());
         app.open_publish_dialog(PublishTarget::Draft);
 
         app.publish_dialog_focus = PublishDialogFocus::Publish;
         app.activate_publish_dialog_focus();
 
         assert!(app.publish_dialog.is_none());
-        assert!(matches!(app.publishing, Some(PublishTarget::Draft)));
+        assert!(matches!(
+            app.publish_job.as_ref().map(|job| job.target),
+            Some(PublishTarget::Draft)
+        ));
         assert_eq!(app.focus, Focus::Textbox);
         assert!(app.alert.is_none());
+        assert!(!app.textarea.is_empty());
+        // Drop the job so the stray worker result is discarded.
+        app.publish_job = None;
     }
 
     #[test]
     fn publishing_without_configured_endpoint_alerts_and_keeps_text() {
         let mut app = App::default();
         app.textarea.insert_str("draft");
-        app.micropub_service = None;
+        app.service_api_url = None;
+        app.service_auth_token = None;
+        app.open_publish_dialog(PublishTarget::Post);
 
-        app.publish(PublishTarget::Post);
+        app.publish_dialog_focus = PublishDialogFocus::Publish;
+        app.activate_publish_dialog_focus();
 
+        assert!(app.publish_dialog.is_none());
+        assert!(app.publish_job.is_none());
         assert!(app.alert.is_some());
         assert_eq!(app.alert.as_ref().map(|a| a.kind), Some(AlertKind::Error));
         assert_eq!(app.textarea.lines(), ["draft"]);
-        assert!(app.publishing.is_none());
+    }
+
+    #[test]
+    fn publishing_without_auth_token_alerts_and_keeps_text() {
+        let mut app = App::default();
+        app.textarea.insert_str("draft");
+        app.service_api_url = Some("https://example.com/micropub".to_string());
+        app.service_auth_token = None;
+        app.open_publish_dialog(PublishTarget::Post);
+
+        app.publish_dialog_focus = PublishDialogFocus::Publish;
+        app.activate_publish_dialog_focus();
+
+        assert!(app.publish_job.is_none());
+        assert_eq!(app.alert.as_ref().map(|a| a.kind), Some(AlertKind::Error));
+        assert_eq!(app.textarea.lines(), ["draft"]);
+    }
+
+    fn test_draft_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("mptui-ui-test-{}-{name}", std::process::id()))
+    }
+
+    #[test]
+    fn status_text_shows_counts_and_cursor() {
+        let mut app = App::new(MicropubSettings::default(), None);
+        app.textarea.insert_str("hello world\nfoo");
+
+        let status = app.status_text();
+        assert!(status.contains("Words: 3"), "unexpected status: {status}");
+        assert!(status.contains("Chars: 15"), "unexpected status: {status}");
+        assert!(status.contains("Ln:2,Col:4"), "unexpected status: {status}");
+    }
+
+    #[test]
+    fn status_text_shows_publishing_state_and_last_url() {
+        let mut app = App::new(MicropubSettings::default(), None);
+        let (_sender, receiver) = mpsc::channel();
+        app.publish_job = Some(PublishJob {
+            target: PublishTarget::Post,
+            receiver,
+        });
+        assert_eq!(app.status_text(), "Publishing...");
+
+        app.publish_job = None;
+        app.last_published =
+            Some("https://micro.blog/some/very/long/post/url/that/keeps/going".to_string());
+        let status = app.status_text();
+        assert!(
+            status.contains("Last: https://micro.blog/some/very/lon..."),
+            "unexpected status: {status}"
+        );
+    }
+
+    #[test]
+    fn truncate_end_keeps_short_text_and_cuts_long_text() {
+        assert_eq!(truncate_end("abc", 5), "abc");
+        assert_eq!(truncate_end("abcde", 5), "abcde");
+        assert_eq!(truncate_end("abcdef", 5), "abcde...");
+    }
+
+    #[test]
+    fn parse_settings_reports_configured_endpoint() {
+        let settings = parse_micropub_settings(
+            "[service]\napi_url = \"https://example.com/micropub\"\nauth_token = \"secret\"\n",
+        );
+
+        assert_eq!(
+            settings.endpoint,
+            EndpointState::Configured("example.com/micropub".to_string())
+        );
+        assert_eq!(
+            settings.service_api_url.as_deref(),
+            Some("https://example.com/micropub")
+        );
+        assert_eq!(settings.service_auth_token.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn parse_settings_reports_missing_token() {
+        let settings =
+            parse_micropub_settings("[service]\napi_url = \"https://example.com/micropub\"\n");
+
+        assert_eq!(
+            settings.endpoint,
+            EndpointState::MissingToken("example.com/micropub".to_string())
+        );
+        assert_eq!(
+            settings.service_api_url.as_deref(),
+            Some("https://example.com/micropub")
+        );
+        assert_eq!(settings.service_auth_token, None);
+    }
+
+    #[test]
+    fn parse_settings_reports_missing_endpoint() {
+        let settings = parse_micropub_settings("[service]\nauth_token = \"secret\"\n");
+        assert_eq!(settings.endpoint, EndpointState::Missing);
+
+        let settings = parse_micropub_settings("");
+        assert_eq!(settings.endpoint, EndpointState::Missing);
+
+        let settings = parse_micropub_settings("[service]\napi_url = \"   \"\n");
+        assert_eq!(settings.endpoint, EndpointState::Missing);
+    }
+
+    #[test]
+    fn parse_settings_reports_invalid_toml() {
+        let settings = parse_micropub_settings("[service\napi_url = ");
+        assert!(matches!(settings.endpoint, EndpointState::ParseError(_)));
+    }
+
+    #[test]
+    fn parse_settings_reads_title_extraction() {
+        let settings = parse_micropub_settings("[default_behavior]\nextract_title = true\n");
+        assert!(settings.extract_title);
+
+        let settings = parse_micropub_settings("");
+        assert!(!settings.extract_title);
+    }
+
+    #[test]
+    fn apply_settings_replaces_endpoint_and_credentials() {
+        let mut app = App::new(MicropubSettings::default(), None);
+        assert_eq!(app.endpoint, EndpointState::Missing);
+
+        app.apply_settings(parse_micropub_settings(
+            "[service]\napi_url = \"https://example.com/micropub\"\nauth_token = \"secret\"\n[default_behavior]\nextract_title = true\n",
+        ));
+
+        assert_eq!(
+            app.endpoint,
+            EndpointState::Configured("example.com/micropub".to_string())
+        );
+        assert_eq!(
+            app.service_api_url.as_deref(),
+            Some("https://example.com/micropub")
+        );
+        assert_eq!(app.service_auth_token.as_deref(), Some("secret"));
+        assert!(app.extract_title);
+    }
+
+    #[test]
+    fn auth_failures_are_detected_for_config_reload() {
+        assert!(is_auth_failure("API error: unauthorized - bad token"));
+        assert!(is_auth_failure("API error: invalid_token - expired"));
+        assert!(is_auth_failure("request failed with status 401"));
+        assert!(!is_auth_failure(
+            "API error: invalid_request - missing content"
+        ));
+        assert!(!is_auth_failure("network unreachable"));
+    }
+
+    #[test]
+    fn autosave_round_trip_restores_draft() {
+        let path = test_draft_path("round-trip");
+        let _ = fs::remove_file(&path);
+
+        let mut app = App::new(MicropubSettings::default(), Some(path.clone()));
+        app.textarea.insert_str("line one\nline two");
+        app.autosave_draft();
+        assert_eq!(
+            fs::read_to_string(&path).expect("autosave should write the draft"),
+            "line one\nline two"
+        );
+
+        let mut restored = App::new(MicropubSettings::default(), Some(path.clone()));
+        restored.restore_draft();
+        assert_eq!(restored.textarea.lines(), ["line one", "line two"]);
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn autosave_skips_unchanged_text() {
+        let path = test_draft_path("unchanged");
+        let _ = fs::remove_file(&path);
+
+        let mut app = App::new(MicropubSettings::default(), Some(path.clone()));
+        app.textarea.insert_str("same");
+        app.autosave_draft();
+        assert!(path.exists());
+
+        // No changes since the last save: the file must be left alone.
+        fs::remove_file(&path).expect("autosave should have written the draft");
+        app.autosave_draft();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn autosave_removes_stale_file_for_empty_text() {
+        let path = test_draft_path("stale");
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("test setup should create the parent dir");
+        }
+        fs::write(&path, "stale").expect("test setup should write the stale file");
+
+        let mut app = App::new(MicropubSettings::default(), Some(path.clone()));
+        app.autosave_draft();
+
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn clear_input_deletes_autosave() {
+        let path = test_draft_path("clear");
+        let _ = fs::remove_file(&path);
+
+        let mut app = App::new(MicropubSettings::default(), Some(path.clone()));
+        app.textarea.insert_str("draft");
+        app.autosave_draft();
+        assert!(path.exists());
+
+        app.clear_input();
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn discard_quit_deletes_autosave() {
+        let path = test_draft_path("discard");
+        let _ = fs::remove_file(&path);
+
+        let mut app = App::new(MicropubSettings::default(), Some(path.clone()));
+        app.textarea.insert_str("draft");
+        app.autosave_draft();
+        assert!(path.exists());
+
+        app.quit_dialog = true;
+        app.quit_dialog_focus = QuitDialogFocus::Discard;
+        app.activate_quit_dialog_focus();
+
+        assert!(app.should_quit);
+        assert!(!path.exists());
     }
 
     #[test]
