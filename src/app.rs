@@ -11,8 +11,9 @@ use crate::{
 };
 use crossterm::{
     event::{
-        self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
-        MouseEventKind,
+        self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
+        MouseButton, MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags,
+        PushKeyboardEnhancementFlags,
     },
     execute,
 };
@@ -283,6 +284,14 @@ const HELP_SECTIONS: &[ShortcutSection] = &[
                 action: "Publish draft",
             },
             ShortcutRow {
+                keys: "Ctrl+S",
+                action: "Publish draft",
+            },
+            ShortcutRow {
+                keys: "Ctrl+P",
+                action: "Publish post",
+            },
+            ShortcutRow {
                 keys: "Ctrl+Z",
                 action: "Undo",
             },
@@ -377,11 +386,22 @@ fn help_table(section: &ShortcutSection) -> Table<'_> {
 
 impl App {
     pub(crate) fn run(mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
-        execute!(io::stdout(), event::EnableMouseCapture)?;
+        execute!(
+            io::stdout(),
+            event::EnableMouseCapture,
+            // Ask supporting terminals (Ghostty, Foot, Kitty, ...) for
+            // unambiguous key reports so e.g. Ctrl+Enter arrives distinct
+            // from Enter. Harmless no-op everywhere else.
+            PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES)
+        )?;
         self.restore_draft();
 
         let result = self.run_loop(terminal);
-        let disable_result = execute!(io::stdout(), event::DisableMouseCapture);
+        let disable_result = execute!(
+            io::stdout(),
+            event::PopKeyboardEnhancementFlags,
+            event::DisableMouseCapture
+        );
 
         result.and(disable_result)
     }
@@ -505,7 +525,7 @@ impl App {
         };
 
         let commands = Paragraph::new(
-            "F1 Help  F2 Reload  Ctrl+Enter Publish Post  Shift+Ctrl+Enter Publish Draft  Esc Quit",
+            "F1 Help  F2 Reload  Ctrl+S Publish Draft  Ctrl+P Publish Post  Esc Quit",
         )
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Left);
@@ -1009,6 +1029,27 @@ impl App {
 
         if self.focus == Focus::Textbox
             && key_event.code == KeyCode::Enter
+            && key_event.modifiers.contains(KeyModifiers::CONTROL)
+            && self.has_publishable_text()
+        {
+            self.open_publish_dialog(PublishTarget::Post);
+            return;
+        }
+
+        // Legacy-safe publish shortcuts: unlike Ctrl+Enter, Ctrl+letter
+        // combos produce distinct bytes in every terminal, with or without
+        // kitty keyboard support.
+        if self.focus == Focus::Textbox
+            && key_event.code == KeyCode::Char('s')
+            && key_event.modifiers.contains(KeyModifiers::CONTROL)
+            && self.has_publishable_text()
+        {
+            self.open_publish_dialog(PublishTarget::Draft);
+            return;
+        }
+
+        if self.focus == Focus::Textbox
+            && key_event.code == KeyCode::Char('p')
             && key_event.modifiers.contains(KeyModifiers::CONTROL)
             && self.has_publishable_text()
         {
@@ -1571,6 +1612,38 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::CONTROL));
 
         assert!(matches!(app.publish_dialog, Some(PublishTarget::Post)));
+    }
+
+    #[test]
+    fn ctrl_s_opens_draft_confirmation_from_textbox() {
+        let mut app = App::default();
+        app.textarea.insert_str("draft");
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+
+        assert!(matches!(app.publish_dialog, Some(PublishTarget::Draft)));
+    }
+
+    #[test]
+    fn ctrl_p_opens_post_confirmation_from_textbox() {
+        let mut app = App::default();
+        app.textarea.insert_str("post");
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+
+        assert!(matches!(app.publish_dialog, Some(PublishTarget::Post)));
+    }
+
+    #[test]
+    fn ctrl_s_and_ctrl_p_ignore_whitespace_only_content() {
+        let mut app = App::default();
+        app.textarea.insert_str(" \n\t");
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert!(app.publish_dialog.is_none());
+
+        app.handle_key_event(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL));
+        assert!(app.publish_dialog.is_none());
     }
 
     #[test]
