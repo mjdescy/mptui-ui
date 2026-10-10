@@ -392,7 +392,7 @@ impl App {
             "F1 Help  F2 Reload  Ctrl+Enter Publish Post  Alt+Ctrl+Enter Publish Draft  Esc Quit",
         )
         .style(Style::default().fg(Color::DarkGray))
-        .alignment(Alignment::Center);
+        .alignment(Alignment::Left);
         let status = self.status_text();
         let status_width = ratatui::text::Line::from(status.as_str()).width() as u16;
         let footer = Layout::horizontal([Constraint::Min(10), Constraint::Length(status_width)])
