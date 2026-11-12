@@ -524,7 +524,7 @@ impl App {
         };
 
         let commands = Paragraph::new(
-            "F1 Help  F2 Reload  Ctrl+S Publish Draft  Ctrl+P Publish Post  Esc Quit",
+            "F1 Help  Ctrl+S Publish Draft  Ctrl+P Publish Post  Esc Quit",
         )
         .style(Style::default().fg(Color::DarkGray))
         .alignment(Alignment::Left);
