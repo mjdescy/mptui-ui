@@ -4,7 +4,6 @@ use std::{
     sync::mpsc,
     time::{Duration, Instant},
 };
-
 use crate::{
     config::{self, EndpointState, MicropubSettings, load_micropub_settings},
     publish::{self, PublishJob, PublishTarget, SPINNER_FRAMES, is_auth_failure, run_publish},
@@ -12,7 +11,7 @@ use crate::{
 use crossterm::{
     event::{
         self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, KeyboardEnhancementFlags,
-        MouseButton, MouseEvent, MouseEventKind, PopKeyboardEnhancementFlags,
+        MouseButton, MouseEvent, MouseEventKind,
         PushKeyboardEnhancementFlags,
     },
     execute,
