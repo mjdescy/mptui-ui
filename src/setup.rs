@@ -458,28 +458,37 @@ impl Setup {
     }
 
     fn draw_service_step(&mut self, frame: &mut Frame, inner: Rect) {
+        let path_text = self.path.display().to_string();
+        let intro_start = "No configuration file found at ";
+        let intro_end = ". Let's create one. \
+                         You can change these values later by editing the file.";
+        // The path may be a single unbreakable word, so allow one extra line
+        // for the wrap on top of the plain character count.
+        let width = usize::from(inner.width.max(1));
+        let intro_chars =
+            intro_start.chars().count() + path_text.chars().count() + intro_end.chars().count();
+        let intro_height = (intro_chars.div_ceil(width) + 1).min(8) as u16;
         let rows = Layout::vertical([
-            Constraint::Length(3), // intro
-            Constraint::Length(1), // url label
-            Constraint::Length(2), // url description
-            Constraint::Length(3), // url input
-            Constraint::Length(1), // token label
-            Constraint::Length(2), // token description
-            Constraint::Length(3), // token input
-            Constraint::Length(1), // error
+            Constraint::Length(intro_height), // intro
+            Constraint::Length(1),            // url label
+            Constraint::Length(2),            // url description
+            Constraint::Length(3),            // url input
+            Constraint::Length(1),            // token label
+            Constraint::Length(2),            // token description
+            Constraint::Length(3),            // token input
+            Constraint::Length(1),            // error
             Constraint::Min(0),
             Constraint::Length(3), // buttons
-            Constraint::Length(1), // config path
         ])
         .split(inner);
-        self.draw_path(frame, rows[10]);
 
         frame.render_widget(
-            Paragraph::new(
-                "No configuration file was found. Let's create one. \
-                 You can change these values later by editing the file.",
-            )
-            .wrap(Wrap { trim: true }),
+            Paragraph::new(Line::from(vec![
+                Span::raw(intro_start),
+                Span::styled(path_text, Style::default().fg(Color::Cyan)),
+                Span::raw(intro_end),
+            ]))
+            .wrap(Wrap { trim: false }),
             rows[0],
         );
         frame.render_widget(label("API URL"), rows[1]);
@@ -561,10 +570,8 @@ impl Setup {
             Constraint::Length(1), // error
             Constraint::Min(0),
             Constraint::Length(3), // buttons
-            Constraint::Length(1), // config path
         ])
         .split(inner);
-        self.draw_path(frame, rows[9]);
 
         frame.render_widget(
             Paragraph::new("Almost done. Choose how new posts behave by default.")
@@ -615,14 +622,6 @@ impl Setup {
         render_button(frame, buttons[0], "◀ Back", self.focus == Focus::Back);
         render_button(frame, buttons[1], "Exit", self.focus == Focus::Exit);
         render_button(frame, buttons[3], "Finish ✓", self.focus == Focus::Next);
-    }
-
-    fn draw_path(&self, frame: &mut Frame, area: Rect) {
-        frame.render_widget(
-            Paragraph::new(format!("Configuration file path: {}", self.path.display()))
-                .style(Style::default().fg(Color::DarkGray)),
-            area,
-        );
     }
 
     fn draw_error(&self, frame: &mut Frame, area: Rect) {
@@ -795,6 +794,36 @@ mod tests {
         setup.handle_key(key(KeyCode::Enter));
         assert_eq!(setup.outcome, Some(SetupOutcome::Exited));
         assert!(!path.exists());
+    }
+
+    #[test]
+    fn first_step_intro_shows_wrapped_config_path() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let path = PathBuf::from(format!("/{}/config.toml", "Q".repeat(150)));
+        let mut setup = Setup::new(path);
+        let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
+        terminal.draw(|frame| setup.draw(frame)).unwrap();
+        let q_count = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .filter(|cell| cell.symbol() == "Q")
+            .count();
+        assert_eq!(q_count, 150, "path was clipped");
+
+        // The second form no longer shows the path.
+        setup.step = Step::Behavior;
+        terminal.draw(|frame| setup.draw(frame)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(!text.contains("QQQ"));
     }
 
     #[test]

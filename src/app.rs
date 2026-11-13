@@ -564,8 +564,34 @@ impl App {
         frame.render_widget(Clear, dialog_area);
         frame.render_widget(dialog, dialog_area);
 
-        let content =
-            Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).split(content_area);
+        // The config path gets a box of its own, tall enough for the wrapped
+        // path (at most three lines).
+        let path_text = self
+            .config_path
+            .as_ref()
+            .map(|path| path.display().to_string());
+        let path_box_height = path_text.as_ref().map_or(0, |text| {
+            let inner_width = usize::from(content_area.width.saturating_sub(4).max(1));
+            text.chars().count().div_ceil(inner_width).clamp(1, 3) as u16 + 2
+        });
+        let content = Layout::vertical([
+            Constraint::Min(1),
+            Constraint::Length(path_box_height),
+            Constraint::Length(1),
+        ])
+        .split(content_area);
+        if let Some(text) = path_text {
+            frame.render_widget(
+                Paragraph::new(text).wrap(Wrap { trim: false }).block(
+                    Block::bordered()
+                        .border_set(border::ROUNDED)
+                        .title(" Configuration File ")
+                        .padding(Padding::horizontal(1))
+                        .border_style(Style::default().fg(Color::DarkGray)),
+                ),
+                content[1],
+            );
+        }
         let columns = Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
             .spacing(1)
             .split(content[0]);
@@ -585,7 +611,7 @@ impl App {
             Paragraph::new("Esc / F1 / Enter closes this dialog")
                 .alignment(Alignment::Center)
                 .style(Style::default().fg(Color::DarkGray)),
-            content[1],
+            content[2],
         );
     }
 
@@ -1764,6 +1790,25 @@ mod tests {
         // A click outside dismisses it.
         app.handle_mouse_event(click_at(0, 0));
         assert!(!app.help_open);
+    }
+
+    #[test]
+    fn help_dialog_shows_config_path_in_its_own_box() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let path = PathBuf::from("/home/someone/.config/mp/config.toml");
+        let mut app = App::new(MicropubSettings::default(), Some(path.clone()), None);
+        app.help_open = true;
+        let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
+        terminal.draw(|frame| app.draw(frame)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let rows: Vec<String> = buffer
+            .content()
+            .chunks(100)
+            .map(|row| row.iter().map(|cell| cell.symbol()).collect())
+            .collect();
+        assert!(rows.iter().any(|r| r.contains(" Configuration File ")));
+        assert!(rows.iter().any(|r| r.contains(&path.display().to_string())));
     }
 
     #[test]
