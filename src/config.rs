@@ -5,7 +5,7 @@
 
 use std::{
     fs, io,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 /// Micropub settings loaded from ~/.config/mp/config.toml.
@@ -123,6 +123,31 @@ pub(crate) fn parse_micropub_settings(config_content: &str) -> MicropubSettings 
     settings
 }
 
+/// Turn a user-supplied path into a fully resolved absolute path: relative
+/// paths are joined to the current directory, and symlinks and `.`/`..`
+/// segments are resolved. The file itself need not exist (it may be about to
+/// be created), so the longest existing ancestor is canonicalized and the
+/// remaining components are normalized lexically.
+pub(crate) fn resolve_path(path: &Path) -> io::Result<PathBuf> {
+    let absolute = std::path::absolute(path)?;
+    let Some((existing, canonical)) = absolute
+        .ancestors()
+        .find_map(|ancestor| Some((ancestor, fs::canonicalize(ancestor).ok()?)))
+    else {
+        return Ok(absolute);
+    };
+    let mut resolved = canonical;
+    let tail = absolute.strip_prefix(existing).unwrap_or(Path::new(""));
+    for component in tail.components() {
+        match component {
+            Component::Normal(name) => resolved.push(name),
+            Component::ParentDir => _ = resolved.pop(),
+            _ => {}
+        }
+    }
+    Ok(resolved)
+}
+
 /// Remove the leading `https://` or `http://` protocol prefix from a URL.
 pub(crate) fn strip_url_protocol(url: &str) -> &str {
     url.strip_prefix("https://")
@@ -192,6 +217,29 @@ mod tests {
 
         let settings = parse_micropub_settings("");
         assert!(!settings.extract_title);
+    }
+
+    #[test]
+    fn resolve_path_normalizes_dots_for_missing_files() {
+        let base = fs::canonicalize(std::env::temp_dir()).unwrap();
+        let dir = base.join(format!("mptui-resolve-{}", std::process::id()));
+        fs::create_dir_all(dir.join("real")).unwrap();
+
+        let messy = dir.join("real/../real/./missing/../new/config.toml");
+        assert_eq!(
+            resolve_path(&messy).unwrap(),
+            dir.join("real/new/config.toml")
+        );
+
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(dir.join("real"), dir.join("link")).unwrap();
+            assert_eq!(
+                resolve_path(&dir.join("link/config.toml")).unwrap(),
+                dir.join("real/config.toml")
+            );
+        }
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

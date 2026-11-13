@@ -147,6 +147,16 @@ impl Default for App {
 }
 
 impl App {
+    /// Build an app that reads its settings from `config_path` instead of
+    /// the default location, and keeps using it for reloads and display.
+    pub(crate) fn with_config_path(config_path: PathBuf) -> Self {
+        Self::new(
+            config::load_micropub_settings_from(&config_path),
+            Some(config_path),
+            config::default_draft_path(),
+        )
+    }
+
     /// Build an app with explicit settings and paths. A `None` draft path
     /// disables autosave, and a `None` config path disables config reload,
     /// which keeps tests off the real filesystem.
