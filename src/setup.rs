@@ -468,10 +468,14 @@ impl Setup {
             Step::Service => "Step 1 of 2: Micropub service",
             Step::Behavior => "Step 2 of 2: Default behavior",
         };
+        let title = match self.mode {
+            SetupMode::FirstRun => " Welcome to mptui ",
+            SetupMode::Edit => " Setup ",
+        };
         let block = Block::bordered()
             .border_set(border::ROUNDED)
             .border_style(Style::default().fg(Color::Cyan))
-            .title(Line::from(" Welcome to mptui ").bold())
+            .title(Line::from(title).bold())
             .title_bottom(Line::from(format!(" {step_label} ")).right_aligned())
             .padding(ratatui::widgets::Padding::new(1, 1, 1, 0));
         let inner = block.inner(outer);
