@@ -292,16 +292,16 @@ const HELP_SECTIONS: &[ShortcutSection] = &[
                 action: "Publish post",
             },
             ShortcutRow {
-                keys: "Shift+Ctrl+Enter",
-                action: "Publish draft",
-            },
-            ShortcutRow {
-                keys: "Ctrl+S",
+                keys: "Ctrl+Alt+Enter",
                 action: "Publish draft",
             },
             ShortcutRow {
                 keys: "Ctrl+P",
                 action: "Publish post",
+            },
+            ShortcutRow {
+                keys: "Ctrl+Alt+P",
+                action: "Publish draft",
             },
             ShortcutRow {
                 keys: "Ctrl+Z",
@@ -310,6 +310,14 @@ const HELP_SECTIONS: &[ShortcutSection] = &[
             ShortcutRow {
                 keys: "Ctrl+Y",
                 action: "Redo",
+            },
+            ShortcutRow {
+                keys: "Ctrl+X",
+                action: "Cut",
+            },
+            ShortcutRow {
+                keys: "Ctrl+C",
+                action: "Copy",
             },
             ShortcutRow {
                 keys: "Ctrl+V",
@@ -339,10 +347,6 @@ const HELP_SECTIONS: &[ShortcutSection] = &[
             ShortcutRow {
                 keys: "Esc",
                 action: "Cancel",
-            },
-            ShortcutRow {
-                keys: "O",
-                action: "OK",
             },
         ],
     },
@@ -550,7 +554,7 @@ impl App {
         };
 
         let commands =
-            Paragraph::new("F1 Help  Ctrl+S Publish Draft  Ctrl+P Publish Post  Esc Quit")
+            Paragraph::new("F1 Help  F2 Setup  Ctrl+P Publish Post  Esc Quit")
                 .style(Style::default().fg(Color::DarkGray))
                 .alignment(Alignment::Left);
         let status = self.status_text();
@@ -1069,8 +1073,8 @@ impl App {
 
         if self.focus == Focus::Textbox
             && key_event.code == KeyCode::Enter
-            && key_event.modifiers.contains(KeyModifiers::SHIFT)
             && key_event.modifiers.contains(KeyModifiers::CONTROL)
+            && key_event.modifiers.contains(KeyModifiers::ALT)
             && self.has_publishable_text()
         {
             self.open_publish_dialog(PublishTarget::Draft);
@@ -1090,8 +1094,9 @@ impl App {
         // combos produce distinct bytes in every terminal, with or without
         // kitty keyboard support.
         if self.focus == Focus::Textbox
-            && key_event.code == KeyCode::Char('s')
+            && key_event.code == KeyCode::Char('p')
             && key_event.modifiers.contains(KeyModifiers::CONTROL)
+            && key_event.modifiers.contains(KeyModifiers::ALT)
             && self.has_publishable_text()
         {
             self.open_publish_dialog(PublishTarget::Draft);
