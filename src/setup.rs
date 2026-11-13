@@ -1,6 +1,7 @@
-//! First-run setup wizard.
+//! Setup wizard.
 //!
-//! Shown instead of the main UI when no config file exists. Step 1 collects
+//! Shown instead of the main UI when no config file exists, and on demand
+//! from the editor (F2). Step 1 collects
 //! the Micropub endpoint and auth token, step 2 the default behavior. Leaving
 //! the wizard always goes through a confirmation dialog, so a stray Escape
 //! never exits.
@@ -10,6 +11,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use crate::config;
 use crossterm::event::{
     self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
     MouseEventKind,
@@ -26,6 +28,15 @@ use ratatui::{
 use tui_textarea::TextArea;
 
 const DEFAULT_API_URL: &str = "https://micro.blog/micropub";
+
+/// Where the wizard was launched from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum SetupMode {
+    /// No config file exists yet; leaving exits the app.
+    FirstRun,
+    /// Launched from the editor; leaving returns to it.
+    Edit,
+}
 
 /// How the wizard ended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -75,6 +86,7 @@ struct Areas {
 
 struct Setup {
     path: PathBuf,
+    mode: SetupMode,
     step: Step,
     focus: Focus,
     api_url: TextArea<'static>,
@@ -88,9 +100,13 @@ struct Setup {
 }
 
 /// Run the wizard until the config file is written or the user exits.
-pub(crate) fn run(terminal: &mut DefaultTerminal, config_path: &Path) -> io::Result<SetupOutcome> {
+pub(crate) fn run(
+    terminal: &mut DefaultTerminal,
+    config_path: &Path,
+    mode: SetupMode,
+) -> io::Result<SetupOutcome> {
     crossterm::execute!(io::stdout(), event::EnableMouseCapture)?;
-    let result = run_loop(terminal, Setup::new(config_path.to_path_buf()));
+    let result = run_loop(terminal, Setup::new(config_path.to_path_buf(), mode));
     let disable = crossterm::execute!(io::stdout(), event::DisableMouseCapture);
     result.and_then(|outcome| disable.map(|()| outcome))
 }
@@ -152,19 +168,33 @@ fn write_config(path: &Path, contents: &str) -> io::Result<()> {
 }
 
 impl Setup {
-    fn new(path: PathBuf) -> Self {
+    fn new(path: PathBuf, mode: SetupMode) -> Self {
+        let existing = match mode {
+            SetupMode::Edit => config::load_micropub_settings_from(&path),
+            SetupMode::FirstRun => config::MicropubSettings::default(),
+        };
         let mut api_url = single_line_input();
-        api_url.insert_str(DEFAULT_API_URL);
+        api_url.insert_str(
+            existing
+                .service_api_url
+                .as_deref()
+                .unwrap_or(DEFAULT_API_URL),
+        );
         let mut auth_token = single_line_input();
         auth_token.set_mask_char('•');
+        auth_token.insert_str(existing.service_auth_token.as_deref().unwrap_or(""));
         Self {
             path,
+            mode,
             step: Step::Service,
             focus: Focus::ApiUrl,
             api_url,
             auth_token,
             show_token: false,
-            extract_title: true,
+            extract_title: match mode {
+                SetupMode::Edit => existing.extract_title,
+                SetupMode::FirstRun => true,
+            },
             error: None,
             exit_dialog: None,
             outcome: None,
@@ -459,9 +489,14 @@ impl Setup {
 
     fn draw_service_step(&mut self, frame: &mut Frame, inner: Rect) {
         let path_text = self.path.display().to_string();
-        let intro_start = "No configuration file found at ";
-        let intro_end = ". Let's create one. \
-                         You can change these values later by editing the file.";
+        let (intro_start, intro_end) = match self.mode {
+            SetupMode::FirstRun => (
+                "No configuration file found at ",
+                ". Let's create one. \
+                 You can change these values later by editing the file.",
+            ),
+            SetupMode::Edit => ("Editing configuration file at ", "."),
+        };
         // The path may be a single unbreakable word, so allow one extra line
         // for the wrap on top of the plain character count.
         let width = usize::from(inner.width.max(1));
@@ -652,8 +687,13 @@ impl Setup {
 
         let rows = Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).split(inner);
         frame.render_widget(
-            Paragraph::new("No configuration file will be created,\nand mptui will quit.")
-                .alignment(Alignment::Center),
+            Paragraph::new(match self.mode {
+                SetupMode::FirstRun => {
+                    "No configuration file will be created,\nand mptui will quit."
+                }
+                SetupMode::Edit => "The configuration file will not be changed.",
+            })
+            .alignment(Alignment::Center),
             rows[0],
         );
         let buttons = Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)])
@@ -775,7 +815,7 @@ mod tests {
 
     #[test]
     fn escape_asks_for_confirmation_instead_of_exiting() {
-        let mut setup = Setup::new(temp_path("esc"));
+        let mut setup = Setup::new(temp_path("esc"), SetupMode::FirstRun);
         setup.handle_key(key(KeyCode::Esc));
         assert!(setup.exit_dialog.is_some());
         assert_eq!(setup.outcome, None);
@@ -788,7 +828,7 @@ mod tests {
     #[test]
     fn confirming_exit_ends_without_writing_config() {
         let path = temp_path("exit");
-        let mut setup = Setup::new(path.clone());
+        let mut setup = Setup::new(path.clone(), SetupMode::FirstRun);
         setup.handle_key(key(KeyCode::Esc));
         setup.handle_key(key(KeyCode::Tab));
         setup.handle_key(key(KeyCode::Enter));
@@ -797,11 +837,76 @@ mod tests {
     }
 
     #[test]
+    fn edit_mode_intro_and_prefill() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let path = temp_path("edit");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(
+            &path,
+            "[service]\napi_url = \"https://example.com/micropub\"\nauth_token = \"tok\"\n\n[default_behavior]\nextract_title = false\n",
+        )
+        .unwrap();
+        let mut setup = Setup::new(path.clone(), SetupMode::Edit);
+        assert_eq!(setup.api_url_text(), "https://example.com/micropub");
+        assert_eq!(setup.auth_token_text(), "tok");
+        assert!(!setup.extract_title);
+
+        let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+        terminal.draw(|frame| setup.draw(frame)).unwrap();
+        let text: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|cell| cell.symbol())
+            .collect();
+        assert!(text.contains("Editing configuration file at"));
+        assert!(!text.contains("No configuration file found"));
+
+        // Exiting leaves the file untouched.
+        setup.handle_key(key(KeyCode::Esc));
+        setup.handle_key(key(KeyCode::Tab));
+        setup.handle_key(key(KeyCode::Enter));
+        assert_eq!(setup.outcome, Some(SetupOutcome::Exited));
+        assert!(fs::read_to_string(&path).unwrap().contains("\"tok\""));
+        let _ = fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn exit_dialog_text_depends_on_mode() {
+        use ratatui::{Terminal, backend::TestBackend};
+
+        let render = |mode| {
+            let mut setup = Setup::new(temp_path("dialog"), mode);
+            setup.handle_key(key(KeyCode::Esc));
+            let mut terminal = Terminal::new(TestBackend::new(100, 30)).unwrap();
+            terminal.draw(|frame| setup.draw(frame)).unwrap();
+            terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>()
+        };
+
+        let first_run = render(SetupMode::FirstRun);
+        assert!(first_run.contains("mptui will quit"));
+        assert!(!first_run.contains("will not be changed"));
+
+        let edit = render(SetupMode::Edit);
+        assert!(edit.contains("Exit setup?"));
+        assert!(edit.contains("The configuration file will not be changed."));
+        assert!(!edit.contains("quit"));
+    }
+
+    #[test]
     fn first_step_intro_shows_wrapped_config_path() {
         use ratatui::{Terminal, backend::TestBackend};
 
         let path = PathBuf::from(format!("/{}/config.toml", "Q".repeat(150)));
-        let mut setup = Setup::new(path);
+        let mut setup = Setup::new(path, SetupMode::FirstRun);
         let mut terminal = Terminal::new(TestBackend::new(80, 30)).unwrap();
         terminal.draw(|frame| setup.draw(frame)).unwrap();
         let q_count = terminal
@@ -828,7 +933,7 @@ mod tests {
 
     #[test]
     fn show_token_toggle_changes_mask() {
-        let mut setup = Setup::new(temp_path("show"));
+        let mut setup = Setup::new(temp_path("show"), SetupMode::FirstRun);
         assert!(!setup.show_token);
         setup.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::CONTROL));
         assert!(setup.show_token);
@@ -842,7 +947,7 @@ mod tests {
 
     #[test]
     fn next_requires_token() {
-        let mut setup = Setup::new(temp_path("token"));
+        let mut setup = Setup::new(temp_path("token"), SetupMode::FirstRun);
         setup.go_next();
         assert_eq!(setup.step, Step::Service);
         assert_eq!(setup.focus, Focus::AuthToken);
@@ -852,7 +957,7 @@ mod tests {
     #[test]
     fn full_flow_writes_config() {
         let path = temp_path("flow");
-        let mut setup = Setup::new(path.clone());
+        let mut setup = Setup::new(path.clone(), SetupMode::FirstRun);
         setup.handle_key(key(KeyCode::Enter)); // token empty: stays put
         assert_eq!(setup.focus, Focus::ApiUrl);
         setup.handle_key(key(KeyCode::Tab));

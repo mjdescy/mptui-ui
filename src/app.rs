@@ -1,6 +1,7 @@
 use crate::{
     config::{self, EndpointState, MicropubSettings, load_micropub_settings},
     publish::{self, PublishJob, PublishTarget, SPINNER_FRAMES, is_auth_failure, run_publish},
+    setup::{self, SetupMode, SetupOutcome},
 };
 use crossterm::{
     event::{
@@ -92,6 +93,8 @@ pub(crate) struct App {
     focus: Focus,
     hovered: Option<Focus>,
     should_quit: bool,
+    /// Set by F2; `run_loop` launches the setup wizard when it sees it.
+    setup_requested: bool,
     quit_dialog: bool,
     quit_dialog_focus: QuitDialogFocus,
     help_open: bool,
@@ -173,6 +176,7 @@ impl App {
             focus: Focus::Textbox,
             hovered: None,
             should_quit: false,
+            setup_requested: false,
             quit_dialog: false,
             quit_dialog_focus: QuitDialogFocus::Cancel,
             help_open: false,
@@ -265,7 +269,7 @@ const HELP_SECTIONS: &[ShortcutSection] = &[
             },
             ShortcutRow {
                 keys: "F2",
-                action: "Reload config",
+                action: "Edit configuration",
             },
             ShortcutRow {
                 keys: "Tab",
@@ -414,12 +418,31 @@ impl App {
         result.and(disable_result)
     }
 
+    /// Run the setup wizard over the editor, reloading settings if it saved.
+    fn run_setup(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
+        let Some(path) = self.config_path.clone() else {
+            return Ok(());
+        };
+        let outcome = setup::run(terminal, &path, SetupMode::Edit)?;
+        // The wizard turns mouse capture off when it ends.
+        execute!(io::stdout(), event::EnableMouseCapture)?;
+        terminal.clear()?;
+        if outcome == SetupOutcome::Completed {
+            self.reload_settings();
+        }
+        Ok(())
+    }
+
     fn run_loop(&mut self, terminal: &mut DefaultTerminal) -> io::Result<()> {
         // Autosave at most ~once a second, and only when the text changed.
         let mut last_autosave = Instant::now();
         while !self.should_quit {
             terminal.draw(|frame| self.draw(frame))?;
             self.handle_events()?;
+            if self.setup_requested {
+                self.setup_requested = false;
+                self.run_setup(terminal)?;
+            }
             if self.draft_path.is_some()
                 && self.draft_text() != self.last_saved
                 && last_autosave.elapsed() >= Duration::from_millis(750)
@@ -1046,7 +1069,7 @@ impl App {
         }
 
         if key_event.code == KeyCode::F(2) {
-            self.reload_settings();
+            self.setup_requested = true;
             return;
         }
 
@@ -1971,7 +1994,22 @@ mod tests {
     }
 
     #[test]
-    fn f2_reloads_config_from_app_config_path() {
+    fn f2_requests_setup_wizard() {
+        let mut app = App::new(MicropubSettings::default(), None, None);
+        app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        assert!(app.setup_requested);
+    }
+
+    #[test]
+    fn f2_ignored_while_help_open() {
+        let mut app = App::new(MicropubSettings::default(), None, None);
+        app.help_open = true;
+        app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        assert!(!app.setup_requested);
+    }
+
+    #[test]
+    fn reload_settings_reads_app_config_path() {
         let path = test_draft_path("reload-config");
         fs::write(
             &path,
@@ -1982,7 +2020,7 @@ mod tests {
         let mut app = App::new(MicropubSettings::default(), Some(path.clone()), None);
         assert_eq!(app.endpoint, EndpointState::Missing);
 
-        app.handle_key_event(KeyEvent::new(KeyCode::F(2), KeyModifiers::NONE));
+        app.reload_settings();
 
         assert_eq!(
             app.endpoint,

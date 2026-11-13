@@ -61,7 +61,9 @@ fn run(
     let Some(path) = config_override.or_else(config::config_file_path) else {
         return app::App::default().run(terminal);
     };
-    if !path.exists() && setup::run(terminal, &path)? == setup::SetupOutcome::Exited {
+    if !path.exists()
+        && setup::run(terminal, &path, setup::SetupMode::FirstRun)? == setup::SetupOutcome::Exited
+    {
         return Ok(());
     }
     app::App::with_config_path(path).run(terminal)
