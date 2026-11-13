@@ -1,14 +1,15 @@
 //! Micropub configuration loading.
 //!
-//! Settings are read from `~/.config/mp/config.toml`. Parsing is kept free
-//! of file access so it can be unit tested without touching real files.
+//! Settings are read from `$XDG_CONFIG_HOME/mptui/config.toml` by default,
+//! falling back to `~/.config/mptui/config.toml`.
+//! Parsing is kept free of file access so it can be unit tested without touching real files.
 
 use std::{
     fs, io,
     path::{Component, Path, PathBuf},
 };
 
-/// Micropub settings loaded from ~/.config/mp/config.toml.
+/// Micropub settings loaded from `$XDG_CONFIG_HOME/mptui/config.toml` by default.
 #[derive(Default)]
 pub(crate) struct MicropubSettings {
     /// Endpoint configuration state, driving the header display.
@@ -37,10 +38,15 @@ pub(crate) enum EndpointState {
     ParseError(String),
 }
 
-/// Default location of the mp config file. Returns `None` when the home
-/// directory cannot be determined.
+/// Default location of the mp config file: `$XDG_CONFIG_HOME/mptui/config.toml`,
+/// falling back to `~/.config/mptui/config.toml`. Returns `None` when no
+/// usable base directory exists.
 pub(crate) fn config_file_path() -> Option<PathBuf> {
-    std::env::home_dir().map(|home| home.join(".config/mp/config.toml"))
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .filter(|dir| dir.is_absolute())
+        .or_else(|| std::env::home_dir().map(|home| home.join(".config")))?;
+    Some(base.join("mptui/config.toml"))
 }
 
 /// Read the Micropub settings from the default config path.

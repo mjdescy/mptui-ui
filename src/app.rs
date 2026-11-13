@@ -1836,7 +1836,7 @@ mod tests {
     fn help_dialog_shows_config_path_in_its_own_box() {
         use ratatui::{Terminal, backend::TestBackend};
 
-        let path = PathBuf::from("/home/someone/.config/mp/config.toml");
+        let path = PathBuf::from("/home/someone/.config/mptui/config.toml");
         let mut app = App::new(MicropubSettings::default(), Some(path.clone()), None);
         app.help_open = true;
         let mut terminal = Terminal::new(TestBackend::new(100, 40)).unwrap();
