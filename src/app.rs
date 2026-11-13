@@ -30,7 +30,7 @@ enum Focus {
     Textbox,
     HelpButton,
     ClearButton,
-    SaveDraftButton,
+    SetupButton,
     PostButton,
 }
 
@@ -123,7 +123,7 @@ struct ControlAreas {
     textbox: Rect,
     help_button: Rect,
     clear_button: Rect,
-    save_draft_button: Rect,
+    setup_button: Rect,
     post_button: Rect,
 }
 
@@ -269,7 +269,7 @@ const HELP_SECTIONS: &[ShortcutSection] = &[
             },
             ShortcutRow {
                 keys: "F2",
-                action: "Edit configuration",
+                action: "Setup (edit configuration)",
             },
             ShortcutRow {
                 keys: "Tab",
@@ -471,7 +471,7 @@ impl App {
             Constraint::Min(10),
             Constraint::Length(8),
             Constraint::Length(9),
-            Constraint::Length(17),
+            Constraint::Length(9),
             Constraint::Length(16),
         ])
         .spacing(1)
@@ -517,13 +517,7 @@ impl App {
             Focus::ClearButton,
             can_clear,
         );
-        self.render_button_with_enabled(
-            frame,
-            header_areas[4],
-            "Publish Draft",
-            Focus::SaveDraftButton,
-            can_publish,
-        );
+        self.render_button(frame, header_areas[4], "Setup", Focus::SetupButton);
         self.render_button_with_enabled(
             frame,
             header_areas[5],
@@ -551,7 +545,7 @@ impl App {
             textbox: areas[1],
             help_button: header_areas[2],
             clear_button: header_areas[3],
-            save_draft_button: header_areas[4],
+            setup_button: header_areas[4],
             post_button: header_areas[5],
         };
 
@@ -962,8 +956,8 @@ impl App {
             Some(Focus::HelpButton)
         } else if can_clear && self.control_areas.clear_button.contains(position) {
             Some(Focus::ClearButton)
-        } else if can_publish && self.control_areas.save_draft_button.contains(position) {
-            Some(Focus::SaveDraftButton)
+        } else if self.control_areas.setup_button.contains(position) {
+            Some(Focus::SetupButton)
         } else if can_publish && self.control_areas.post_button.contains(position) {
             Some(Focus::PostButton)
         } else {
@@ -982,9 +976,9 @@ impl App {
                 self.help_open = !self.help_open;
             } else if can_clear && self.control_areas.clear_button.contains(position) {
                 self.clear_input();
-            } else if can_publish && self.control_areas.save_draft_button.contains(position) {
-                self.focus = Focus::SaveDraftButton;
-                self.open_publish_dialog(PublishTarget::Draft);
+            } else if self.control_areas.setup_button.contains(position) {
+                self.focus = Focus::SetupButton;
+                self.setup_requested = true;
             } else if can_publish && self.control_areas.post_button.contains(position) {
                 self.focus = Focus::PostButton;
                 self.open_publish_dialog(PublishTarget::Post);
@@ -1139,10 +1133,8 @@ impl App {
             {
                 self.clear_input()
             }
-            KeyCode::Enter | KeyCode::Char(' ')
-                if self.focus == Focus::SaveDraftButton && self.has_publishable_text() =>
-            {
-                self.open_publish_dialog(PublishTarget::Draft);
+            KeyCode::Enter | KeyCode::Char(' ') if self.focus == Focus::SetupButton => {
+                self.setup_requested = true;
             }
             KeyCode::Enter | KeyCode::Char(' ')
                 if self.focus == Focus::PostButton && self.has_publishable_text() =>
@@ -1470,12 +1462,10 @@ impl App {
         self.focus = match self.focus {
             Focus::Textbox => Focus::HelpButton,
             Focus::HelpButton if can_clear => Focus::ClearButton,
-            Focus::HelpButton if can_publish => Focus::SaveDraftButton,
-            Focus::HelpButton => Focus::Textbox,
-            Focus::ClearButton if can_publish => Focus::SaveDraftButton,
-            Focus::ClearButton => Focus::Textbox,
-            Focus::SaveDraftButton if can_publish => Focus::PostButton,
-            Focus::SaveDraftButton => Focus::Textbox,
+            Focus::HelpButton => Focus::SetupButton,
+            Focus::ClearButton => Focus::SetupButton,
+            Focus::SetupButton if can_publish => Focus::PostButton,
+            Focus::SetupButton => Focus::Textbox,
             Focus::PostButton => Focus::Textbox,
         };
     }
@@ -1485,15 +1475,12 @@ impl App {
         let can_publish = self.has_publishable_text();
         self.focus = match self.focus {
             Focus::Textbox if can_publish => Focus::PostButton,
-            Focus::Textbox if can_clear => Focus::ClearButton,
-            Focus::Textbox => Focus::HelpButton,
+            Focus::Textbox => Focus::SetupButton,
             Focus::HelpButton => Focus::Textbox,
             Focus::ClearButton => Focus::HelpButton,
-            Focus::SaveDraftButton if can_clear => Focus::ClearButton,
-            Focus::SaveDraftButton => Focus::HelpButton,
-            Focus::PostButton if can_publish => Focus::SaveDraftButton,
-            Focus::PostButton if can_clear => Focus::ClearButton,
-            Focus::PostButton => Focus::HelpButton,
+            Focus::SetupButton if can_clear => Focus::ClearButton,
+            Focus::SetupButton => Focus::HelpButton,
+            Focus::PostButton => Focus::SetupButton,
         };
     }
 }
@@ -1567,7 +1554,7 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.focus, Focus::ClearButton);
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        assert_eq!(app.focus, Focus::SaveDraftButton);
+        assert_eq!(app.focus, Focus::SetupButton);
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.focus, Focus::PostButton);
     }
@@ -1577,6 +1564,8 @@ mod tests {
         let mut app = App::default();
 
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        assert_eq!(app.focus, Focus::SetupButton);
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         assert_eq!(app.focus, Focus::Textbox);
 
@@ -1611,16 +1600,17 @@ mod tests {
         let mut app = App::default();
         app.textarea.insert_str(" \n\t");
 
-        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-        app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        for _ in 0..4 {
+            app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
+        }
 
+        // Help, Clear, Setup, then back to the textbox: Publish Post is skipped.
         assert_eq!(app.focus, Focus::Textbox);
         assert!(app.publish_dialog.is_none());
     }
 
     #[test]
-    fn publish_buttons_open_the_matching_confirmation_dialog() {
+    fn setup_and_publish_buttons_trigger_their_actions() {
         let mut app = App::default();
         app.textarea.insert_str("draft");
         // Never hit the network from tests: confirming must fail fast.
@@ -1631,10 +1621,8 @@ mod tests {
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
-
-        assert!(matches!(app.publish_dialog, Some(PublishTarget::Draft)));
-        app.handle_key_event(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE));
-        assert!(app.publish_dialog.is_none());
+        assert!(app.setup_requested);
+        app.setup_requested = false;
 
         app.handle_key_event(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
         app.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
@@ -1658,6 +1646,20 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         });
         assert!(matches!(app.publish_dialog, Some(PublishTarget::Post)));
+    }
+
+    #[test]
+    fn setup_button_click_requests_wizard_even_with_empty_text() {
+        let mut app = App::default();
+        app.control_areas.setup_button = Rect::new(30, 1, 9, 3);
+        app.handle_mouse_event(MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 32,
+            row: 2,
+            modifiers: KeyModifiers::NONE,
+        });
+        assert!(app.setup_requested);
+        assert_eq!(app.focus, Focus::SetupButton);
     }
 
     #[test]
